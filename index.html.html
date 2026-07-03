@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>ChoreBoard</title>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-database-compat.js"></script>
+<style>
+  :root {
+    --navy:#16263B; --navy-light:#223955; --blue:#2E7FB8; --blue-light:#E8F2FA;
+    --ink:#1C2330; --ink-soft:#5B6577; --ink-faint:#9AA3B2;
+    --line:#DDE3EC; --bg:#F4F6F9; --card:#FFFFFF; --good:#1E8449;
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    -webkit-tap-highlight-color: transparent; }
+  .app { max-width:560px; margin:0 auto; min-height:100vh; padding-bottom:90px; }
+
+  .topbar { background:linear-gradient(135deg,var(--navy) 0%,var(--navy-light) 100%); color:white;
+    padding:18px 18px 14px; position:sticky; top:0; z-index:30; }
+  .topbar-row { display:flex; align-items:center; justify-content:space-between; }
+  .logo { font-size:22px; font-weight:800; letter-spacing:-0.5px; }
+  .logo span { color:#7FC4F0; }
+  .me-badge { display:flex; align-items:center; gap:6px; background:rgba(255,255,255,0.12);
+    border-radius:20px; padding:5px 10px 5px 6px; font-size:12.5px; font-weight:600; cursor:pointer;
+    border:none; color:white; }
+  .me-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+  .week-row { margin-top:10px; display:flex; align-items:center; gap:8px; }
+  .week-row input { flex:1; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.18);
+    border-radius:8px; color:white; padding:7px 10px; font-size:13px; outline:none; }
+  .week-row input::placeholder { color:rgba(255,255,255,0.5); }
+  .week-label { font-size:11px; font-weight:700; letter-spacing:0.06em; color:#9FC9EA; text-transform:uppercase; }
+
+  .sync-pill { display:flex; align-items:center; gap:5px; font-size:10.5px; color:#9FC9EA; margin-top:8px; }
+  .sync-dot { width:6px; height:6px; border-radius:50%; background:#4ADE80; }
+  .sync-dot.err { background:#F87171; }
+  .sync-dot.busy { background:#FBBF24; }
+
+  .tabs { display:flex; gap:0; background:var(--navy-light); position:sticky; top:96px; z-index:29; }
+  .tab { flex:1; text-align:center; padding:11px 4px; font-size:13.5px; font-weight:700;
+    color:rgba(255,255,255,0.55); cursor:pointer; border-bottom:3px solid transparent;
+    background:none; border-top:none; border-left:none; border-right:none; }
+  .tab.active { color:white; border-bottom-color:#7FC4F0; }
+
+  .section { padding:16px 14px 4px; }
+  .section-title { font-size:11.5px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase;
+    color:var(--ink-soft); margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+  .card { background:var(--card); border-radius:14px; padding:14px;
+    box-shadow:0 1px 2px rgba(20,30,50,0.06); margin-bottom:12px; border:1px solid var(--line); }
+
+  .day-picker { display:flex; gap:6px; padding:12px 14px 4px; overflow-x:auto; }
+  .day-pill { flex:1; text-align:center; padding:9px 0; border-radius:10px; font-size:12.5px; font-weight:700;
+    background:white; color:var(--ink-soft); border:1px solid var(--line); cursor:pointer; min-width:40px; }
+  .day-pill.active { background:var(--navy); color:white; border-color:var(--navy); }
+  .day-pill.today-marker::after { content:''; display:block; width:4px; height:4px; border-radius:50%;
+    background:var(--blue); margin:3px auto 0; }
+  .day-pill.active.today-marker::after { background:#7FC4F0; }
+
+  .rule-row { display:flex; gap:8px; padding:6px 0; font-size:13.5px; line-height:1.4; }
+  .rule-num { color:var(--blue); font-weight:800; flex-shrink:0; }
+
+  .person-card { border-radius:14px; margin-bottom:10px; overflow:hidden; border:1px solid var(--line); }
+  .person-head { padding:10px 14px; display:flex; align-items:center; justify-content:space-between;
+    color:white; font-weight:800; font-size:14.5px; }
+  .person-head .pct { font-size:11.5px; font-weight:700; background:rgba(255,255,255,0.22);
+    padding:3px 8px; border-radius:20px; }
+  .person-body { background:white; padding:4px 6px; }
+  .task-row { display:flex; align-items:flex-start; gap:10px; padding:9px 8px; border-bottom:1px solid #F0F2F6; }
+  .task-row:last-child { border-bottom:none; }
+  .task-row.locked { opacity:0.45; }
+  .chk { width:23px; height:23px; border-radius:7px; border:2px solid var(--line); flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; cursor:pointer; background:white; margin-top:1px; }
+  .chk.checked { background:var(--good); border-color:var(--good); }
+  .chk svg { width:14px; height:14px; display:none; }
+  .chk.checked svg { display:block; }
+  .task-text { font-size:14px; line-height:1.35; flex:1; }
+  .task-text.done { color:var(--ink-faint); text-decoration:line-through; }
+  .task-note { font-size:11.5px; color:var(--ink-faint); font-style:italic; margin-top:1px; }
+
+  .chore-card { border-radius:14px; overflow:hidden; border:1px solid var(--line); margin-bottom:10px; background:white; }
+  .chore-section-head { padding:8px 14px; font-size:11.5px; font-weight:800; letter-spacing:0.05em;
+    text-transform:uppercase; color:white; }
+  .chore-row { padding:12px 14px; border-bottom:1px solid #F0F2F6; }
+  .chore-row:last-child { border-bottom:none; }
+  .chore-name { font-size:14.5px; font-weight:700; margin-bottom:2px; }
+  .chore-rule { font-size:12px; color:var(--ink-soft); line-height:1.4; margin-bottom:8px; }
+  .chore-meta { font-size:11.5px; color:var(--ink-faint); margin-bottom:8px; }
+  .chore-meta b { color:var(--ink-soft); }
+  .people-checks { display:flex; gap:10px; flex-wrap:wrap; }
+  .person-check-pill { display:flex; align-items:center; gap:7px; padding:7px 12px; border-radius:20px;
+    border:1.5px solid var(--line); font-size:13px; font-weight:700; cursor:pointer; background:white; }
+  .person-check-pill.locked { opacity:0.4; cursor:default; }
+  .person-check-pill .dot { width:9px; height:9px; border-radius:50%; }
+  .person-check-pill.on { color:white; }
+
+  .plan-row { padding:12px 14px; border-bottom:1px solid #F0F2F6; }
+  .plan-row:last-child { border-bottom:none; }
+  .plan-name { font-size:14px; font-weight:700; margin-bottom:2px; }
+  .plan-rule { font-size:11.5px; color:var(--ink-soft); margin-bottom:8px; line-height:1.35; }
+  .plan-input { width:100%; border:1.5px solid var(--line); border-radius:9px; padding:8px 10px;
+    font-size:13.5px; outline:none; color:var(--ink); background:#FAFBFD; }
+  .plan-input:focus { border-color:var(--blue); background:white; }
+
+  .signoff-card { background:linear-gradient(135deg,var(--navy) 0%,var(--navy-light) 100%); color:white;
+    border-radius:14px; padding:16px; margin:14px; }
+  .signoff-title { font-size:15px; font-weight:800; margin-bottom:4px; }
+  .signoff-sub { font-size:12.5px; color:#B9CCE0; margin-bottom:14px; line-height:1.4; }
+  .signoff-people { display:flex; flex-direction:column; gap:8px; margin-bottom:14px; }
+  .signoff-pill { display:flex; align-items:center; justify-content:space-between; padding:11px 14px;
+    background:rgba(255,255,255,0.08); border-radius:11px; border:1.5px solid rgba(255,255,255,0.15); }
+  .signoff-pill.signed { background:rgba(46,204,113,0.18); border-color:rgba(46,204,113,0.5); }
+  .signoff-pill-left { display:flex; align-items:center; gap:9px; font-weight:700; font-size:14px; }
+  .signoff-btn { font-size:12px; font-weight:800; padding:7px 14px; border-radius:20px; border:none; cursor:pointer; }
+  .signoff-btn.unsigned { background:#7FC4F0; color:var(--navy); }
+  .signoff-btn.signed-btn { background:rgba(46,204,113,0.25); color:#6FE3A0; }
+  .signoff-btn.disabled { background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.4); cursor:default; }
+  .start-week-btn { width:100%; padding:13px; border-radius:11px; border:none; font-size:14.5px; font-weight:800;
+    cursor:pointer; margin-top:2px; }
+  .start-week-btn.ready { background:#4ADE80; color:#06371C; }
+  .start-week-btn.not-ready { background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.4); cursor:default; }
+
+  .notes-card { padding:14px; }
+  .notes-card textarea { width:100%; min-height:64px; border:1.5px solid var(--line); border-radius:9px;
+    padding:10px; font-size:13.5px; outline:none; font-family:inherit; resize:vertical; color:var(--ink); }
+  .notes-card textarea:focus { border-color:var(--blue); }
+
+  .modal-overlay { position:fixed; inset:0; background:rgba(15,22,35,0.55); z-index:100;
+    display:flex; align-items:center; justify-content:center; padding:24px; }
+  .modal { background:white; border-radius:18px; padding:26px 22px; max-width:380px; width:100%; text-align:center; }
+  .modal h2 { margin:0 0 6px; font-size:20px; color:var(--navy); }
+  .modal p { margin:0 0 18px; font-size:13.5px; color:var(--ink-soft); line-height:1.4; }
+  .modal input { width:100%; padding:12px 14px; border-radius:10px; border:1.5px solid var(--line);
+    font-size:15px; outline:none; margin-bottom:12px; text-align:center; }
+  .modal input:focus { border-color:var(--blue); }
+  .modal button { width:100%; padding:12px; border-radius:10px; border:none; background:var(--navy);
+    color:white; font-size:14.5px; font-weight:700; cursor:pointer; }
+  .modal-switch-list { display:flex; flex-direction:column; gap:8px; margin-bottom:14px; }
+  .modal-switch-opt { display:flex; align-items:center; gap:10px; padding:11px 14px; border-radius:11px;
+    border:1.5px solid var(--line); cursor:pointer; font-weight:700; font-size:14px; }
+  .modal-switch-opt .dot { width:11px; height:11px; border-radius:50%; }
+  .modal-link { background:none; border:none; color:var(--blue); font-size:13px; font-weight:700;
+    margin-top:6px; cursor:pointer; }
+
+  .err-box { text-align:left; background:#FCEAEA; border:1px solid #F2B8B8; border-radius:10px;
+    padding:12px 14px; font-size:12.5px; line-height:1.5; color:#8A2424; margin-bottom:14px; }
+  .err-box code { background:rgba(0,0,0,0.06); padding:1px 5px; border-radius:4px; font-size:11px; }
+
+  .loading-screen { min-height:100vh; display:flex; align-items:center; justify-content:center;
+    flex-direction:column; color:var(--ink-soft); font-size:14px; gap:10px; text-align:center; padding:0 30px; }
+  .spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--blue);
+    animation:spin 0.8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--navy);
+    color:white; padding:10px 18px; border-radius:30px; font-size:13px; font-weight:600; z-index:200;
+    box-shadow:0 4px 16px rgba(0,0,0,0.2); opacity:0; pointer-events:none; transition:opacity 0.25s ease; }
+  .toast.show { opacity:1; }
+
+  .footer-note { text-align:center; font-size:11px; color:var(--ink-faint); padding:18px 20px 10px; line-height:1.5; }
+</style>
+</head>
+<body>
+
+<div id="loading" class="loading-screen">
+  <div class="spinner"></div>
+  <div>Loading ChoreBoard…</div>
+</div>
+
+<div class="app" id="app" style="display:none;"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   FIREBASE CONFIG — paste your config object from the Firebase
+   console here (Project settings → Your apps → SDK setup).
+   ════════════════════════════════════════════════════════════════ */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCutb5gF5dD9WIU2EE1amjbxtzQ75DBzJo",
+  authDomain: "choreboard-70408.firebaseapp.com",
+  databaseURL: "https://choreboard-70408-default-rtdb.firebaseio.com",
+  projectId: "choreboard-70408",
+  storageBucket: "choreboard-70408.firebasestorage.app",
+  messagingSenderId: "567924294979",
+  appId: "1:567924294979:web:937be287040b3729a59bf6"
+};
+
+const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const DAY_FULL = {Mon:'Monday',Tue:'Tuesday',Wed:'Wednesday',Thu:'Thursday',Fri:'Friday',Sat:'Saturday',Sun:'Sunday'};
+const TODAY_IDX = (new Date().getDay() + 6) % 7;
+
+const DEFAULT_PEOPLE = [
+  { id:'jayden',  name:'Jayden',  color:'#1A6B9A' },
+  { id:'michael', name:'Michael', color:'#1E8449' },
+  { id:'jessica', name:'Jessica', color:'#7D3C98' },
+];
+
+const RULES = [
+  'Clean up after yourself — inside and outside the house.',
+  'Everyone handles their own dishes throughout the day.',
+  'Wash hands when you come home.',
+  'Dishes = washed AND put away before dinner prep begins.',
+  'Dishes put away must be organized — proper place, not just stacked.',
+  'If you cook on the grill, you clean the grill.',
+];
+
+const PERSONAL_TASKS = {
+  jayden: [
+    { id:'bed', text:'Make bed' },
+    { id:'items', text:'Pick up personal items' },
+    { id:'dishes', text:'Personal dishes/cup' },
+    { id:'sink', text:'Wipe sink/counter' },
+    { id:'reset', text:'Room reset' },
+    { id:'poop', text:'Pick up the poop', note:'Main responsibility' },
+    { id:'homework', text:'Homework', note:'All Monday homework done', days:['Mon'] },
+    { id:'laundry', text:'Laundry (1–2 loads)', note:'Washed & put away', days:['Wed'] },
+  ],
+  michael: [
+    { id:'bed', text:'Make bed' },
+    { id:'items', text:'Pick up personal items' },
+    { id:'dishes', text:'Personal dishes/cup' },
+    { id:'sink', text:'Wipe sink/counter' },
+    { id:'reset', text:'Room reset' },
+    { id:'plants', text:'Take care of plants' },
+  ],
+  jessica: [
+    { id:'bed', text:'Make bed' },
+    { id:'items', text:'Pick up personal items' },
+    { id:'dishes', text:'Personal dishes/cup' },
+    { id:'sink', text:'Wipe sink/counter' },
+    { id:'reset', text:'Room reset' },
+    { id:'poop', text:'Pick up the poop', note:'Helps Jayden' },
+  ],
+};
+
+const CHORES = [
+  { id:'cook', section:'Daily Chores', color:'#2E7FB8', name:'Cook dinner', rule:'Full meal served. If the grill was used, the cook cleans it.', days:'all' },
+  { id:'afterdish', section:'Daily Chores', color:'#2E7FB8', name:'After dinner dishes', rule:'Washed, dried & put away — organized in proper place.', days:'all' },
+  { id:'afterkitchen', section:'Daily Chores', color:'#2E7FB8', name:'After dinner kitchen clean', rule:'Counters + food away + stove + microwave + white coffee table + trash.', days:'all' },
+  { id:'sweepmop', section:'Daily Chores', color:'#2E7FB8', name:'Sweep & Mop (Kitchen + Living)', rule:'Full sweep & mop. Only needed 2x this week.', days:['Wed','Sat'] },
+  { id:'toilet', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Bathroom — Clean toilet', rule:'Bowl, seat, lid & base fully scrubbed.', days:['Sat'] },
+  { id:'tub', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Bathroom — Clean bathtub/shower', rule:'Tub & walls fully scrubbed & rinsed.', days:['Sat'] },
+  { id:'fridge', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Clean refrigerator', rule:'Remove old food, wipe all shelves.', days:['Sat'] },
+  { id:'sheets', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Change bed sheets', rule:'Removed, washed & put back on.', days:['Sat'] },
+  { id:'cabinets', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Organize cabinets/closets', rule:'Sorted, floor clear, doors close fully.', days:['Sat'] },
+  { id:'trash', section:'Weekly Reset (Saturday)', color:'#1E8449', name:'Empty all trash cans', rule:'All cans emptied & relined.', days:['Sat'] },
+  { id:'backyard', section:'Yard / Extra (Saturday)', color:'#B8860B', name:'Backyard maintenance', rule:'Pick up, sweep & tidy — no clutter.', days:['Sat'] },
+  { id:'bbq', section:'Yard / Extra (Saturday)', color:'#B8860B', name:'Clean BBQ', rule:'Grates scrubbed, grease tray emptied.', days:['Sat'] },
+  { id:'garage', section:'Yard / Extra (Saturday)', color:'#B8860B', name:'Clean garage', rule:'Swept, items off floor & stored.', days:['Sat'] },
+];
+
+function isChoreActiveOn(chore, day) { return chore.days === 'all' || chore.days.includes(day); }
+function isTaskActiveOn(task, day) { if (!task.days) return true; return task.days.includes(day); }
+
+function freshState() {
+  return {
+    weekOf:'', people:DEFAULT_PEOPLE, notes:'',
+    completions:{}, personalDone:{}, responsible:{},
+    nextWeek:{ weekOf:'', responsible:{}, signOffs:{}, notes:'' }
+  };
+}
+
+/* ════════════════════════════════════════════════════════════════
+   STORAGE LAYER — Firebase Realtime Database (shared) +
+   localStorage (per-device "who am I" identity)
+   ════════════════════════════════════════════════════════════════ */
+let state = null;
+let me = null;
+let activeTab = 'today';
+let selectedDay = DAYS[TODAY_IDX];
+let saving = false;
+let syncStatus = 'ok';
+let configError = false;
+let firstLoadDone = false;
+let stateRef = null;
+
+function configLooksUnset() {
+  return Object.values(FIREBASE_CONFIG).some(v => typeof v === 'string' && v.startsWith('PASTE_'));
+}
+
+function initFirebase() {
+  if (configLooksUnset()) { configError = true; return; }
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    stateRef = firebase.database().ref('choreboard-state');
+  } catch (e) {
+    configError = true;
+  }
+}
+
+function listenToState() {
+  if (!stateRef) return;
+  stateRef.on('value', (snapshot) => {
+    syncStatus = 'ok';
+    const val = snapshot.val();
+    if (val) {
+      const f = freshState();
+      const merged = Object.assign(f, val);
+      merged.completions = val.completions || {};
+      merged.personalDone = val.personalDone || {};
+      merged.responsible = val.responsible || {};
+      merged.nextWeek = Object.assign({weekOf:'', responsible:{}, signOffs:{}, notes:''}, val.nextWeek || {});
+      merged.people = (val.people && val.people.length) ? val.people : DEFAULT_PEOPLE;
+      state = merged;
+    } else {
+      state = freshState();
+      stateRef.set(state);
+    }
+    const typing = document.activeElement && ['INPUT','TEXTAREA'].includes(document.activeElement.tagName);
+    if (!firstLoadDone) {
+      firstLoadDone = true;
+      render();
+    } else if (!typing) {
+      render();
+    }
+  }, (err) => {
+    syncStatus = 'err';
+    if (!firstLoadDone) { firstLoadDone = true; state = state || freshState(); render(); }
+  });
+}
+
+async function saveState() {
+  if (!stateRef) return;
+  saving = true;
+  syncStatus = 'busy';
+  try {
+    await stateRef.set(state);
+    syncStatus = 'ok';
+  } catch (e) {
+    syncStatus = 'err';
+    showToast("Couldn't sync — check your connection");
+  }
+  saving = false;
+}
+
+function loadMe() {
+  try {
+    const raw = localStorage.getItem('choreboard-me');
+    if (raw) me = JSON.parse(raw);
+  } catch (e) { me = null; }
+}
+function saveMe() {
+  try { localStorage.setItem('choreboard-me', JSON.stringify(me)); } catch (e) {}
+}
+
+/* ════════════════════════════════════════════════════════════════
+   HELPERS
+   ════════════════════════════════════════════════════════════════ */
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+function findOrCreatePerson(typedName) {
+  const clean = typedName.trim();
+  if (!clean) return null;
+  const match = state.people.find(p => p.name.toLowerCase() === clean.toLowerCase());
+  if (match) return match;
+  const palette = ['#C0392B','#2980B9','#27AE60','#8E44AD','#D68910','#16A085'];
+  const color = palette[state.people.length % palette.length];
+  const id = clean.toLowerCase().replace(/[^a-z0-9]/g, '') || ('p' + Date.now());
+  const newPerson = { id, name: clean, color };
+  state.people.push(newPerson);
+  PERSONAL_TASKS[id] = PERSONAL_TASKS[id] || [
+    { id:'bed', text:'Make bed' },
+    { id:'items', text:'Pick up personal items' },
+    { id:'dishes', text:'Personal dishes/cup' },
+    { id:'sink', text:'Wipe sink/counter' },
+    { id:'reset', text:'Room reset' },
+  ];
+  return newPerson;
+}
+
+function pctForPerson(personId) {
+  const tasks = (PERSONAL_TASKS[personId]||[]).filter(t => isTaskActiveOn(t, selectedDay));
+  if (!tasks.length) return 100;
+  const done = tasks.filter(t => state.personalDone[`${personId}-${t.id}-${selectedDay}`]).length;
+  return Math.round((done / tasks.length) * 100);
+}
+
+function escapeHtml(str) {
+  return String(str || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+/* ════════════════════════════════════════════════════════════════
+   RENDER
+   ════════════════════════════════════════════════════════════════ */
+function render() {
+  const app = document.getElementById('app');
+
+  if (configError) { renderConfigError(); app.style.display='block'; document.getElementById('loading').style.display='none'; return; }
+  if (!state) return;
+  if (!me) { renderIdentityModal(); app.style.display='block'; document.getElementById('loading').style.display='none'; return; }
+
+  app.innerHTML = `
+    ${renderTopbar()}
+    ${renderTabs()}
+    ${activeTab === 'today' ? renderToday() : renderPlan()}
+    <div class="footer-note">ChoreBoard · Synced live for everyone via Firebase</div>
+  `;
+  app.style.display = 'block';
+  document.getElementById('loading').style.display = 'none';
+  attachHandlers();
+}
+
+function renderConfigError() {
+  document.getElementById('app').innerHTML = `
+    <div class="modal-overlay"><div class="modal">
+      <h2>🔧 Setup needed</h2>
+      <p>This app needs to be connected to a free Firebase project before it can sync between phones.</p>
+      <div class="err-box">
+        Open the HTML file's source code and find <code>const FIREBASE_CONFIG = {...}</code> near the top.
+        Replace the placeholder values with the config object from your Firebase project
+        (Project settings → Your apps → SDK setup and configuration).
+      </div>
+    </div></div>`;
+}
+
+function renderTopbar() {
+  const myPerson = state.people.find(p => p.id === me.id) || { color:'#2E7FB8' };
+  const dotClass = syncStatus === 'ok' ? '' : (syncStatus === 'busy' ? 'busy' : 'err');
+  const dotLabel = syncStatus === 'ok' ? 'Synced' : (syncStatus === 'busy' ? 'Syncing…' : 'Offline — will retry');
+  return `
+    <div class="topbar">
+      <div class="topbar-row">
+        <div class="logo">CHORE<span>BOARD</span></div>
+        <button class="me-badge" id="me-badge-btn">
+          <span class="me-dot" style="background:${myPerson.color}"></span>${me.name}
+        </button>
+      </div>
+      <div class="week-row">
+        <span class="week-label">Week of</span>
+        <input id="week-input" type="text" placeholder="e.g. Jun 30" value="${escapeHtml(state.weekOf || '')}" />
+      </div>
+      <div class="sync-pill"><span class="sync-dot ${dotClass}"></span>${dotLabel}</div>
+    </div>
+  `;
+}
+
+function renderTabs() {
+  return `
+    <div class="tabs">
+      <button class="tab ${activeTab==='today'?'active':''}" data-tab="today">✅ This Week</button>
+      <button class="tab ${activeTab==='plan'?'active':''}" data-tab="plan">📝 Plan Next Week</button>
+    </div>
+  `;
+}
+
+function renderToday() {
+  let html = '';
+  html += `<div class="day-picker">`;
+  DAYS.forEach((d,i) => {
+    const isToday = i === TODAY_IDX;
+    html += `<div class="day-pill ${selectedDay===d?'active':''} ${isToday?'today-marker':''}" data-day="${d}">${d}</div>`;
+  });
+  html += `</div>`;
+
+  html += `<div class="section"><div class="section-title">🏠 Rules of the House</div><div class="card">
+    ${RULES.map((r,i)=>`<div class="rule-row"><span class="rule-num">${i+1}.</span><span>${escapeHtml(r)}</span></div>`).join('')}
+  </div></div>`;
+
+  html += `<div class="section"><div class="section-title">👤 Personal Tasks — ${DAY_FULL[selectedDay]}</div>`;
+  state.people.forEach(p => {
+    const tasks = (PERSONAL_TASKS[p.id]||[]).filter(t => isTaskActiveOn(t, selectedDay));
+    if (!tasks.length) return;
+    const isMe = p.id === me.id;
+    const pct = pctForPerson(p.id);
+    html += `<div class="person-card">
+      <div class="person-head" style="background:${p.color}">
+        <span>${escapeHtml(p.name)}${isMe?' (you)':''}</span><span class="pct">${pct}%</span>
+      </div><div class="person-body">
+        ${tasks.map(t => {
+          const key = `${p.id}-${t.id}-${selectedDay}`;
+          const checked = !!state.personalDone[key];
+          const locked = !isMe;
+          return `<div class="task-row ${locked?'locked':''}">
+            <div class="chk ${checked?'checked':''}" ${locked?'':`data-ptask="${key}"`}>
+              <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <div><div class="task-text ${checked?'done':''}">${escapeHtml(t.text)}</div>
+            ${t.note?`<div class="task-note">${escapeHtml(t.note)}</div>`:''}</div>
+          </div>`;
+        }).join('')}
+      </div></div>`;
+  });
+  html += `</div>`;
+
+  html += `<div class="section"><div class="section-title">📋 Chores — ${DAY_FULL[selectedDay]}</div>`;
+  const sections = [...new Set(CHORES.map(c=>c.section))];
+  sections.forEach(secName => {
+    const choresInSection = CHORES.filter(c => c.section===secName && isChoreActiveOn(c, selectedDay));
+    if (!choresInSection.length) return;
+    const color = choresInSection[0].color;
+    html += `<div class="chore-card"><div class="chore-section-head" style="background:${color}">${escapeHtml(secName)}</div>`;
+    choresInSection.forEach(chore => {
+      const responsible = state.responsible[chore.id];
+      html += `<div class="chore-row">
+        <div class="chore-name">${escapeHtml(chore.name)}</div>
+        <div class="chore-rule">${escapeHtml(chore.rule)}</div>
+        ${responsible?`<div class="chore-meta">Responsible: <b>${escapeHtml(responsible)}</b></div>`:''}
+        <div class="people-checks">
+          ${state.people.map(p => {
+            const key = `${chore.id}-${selectedDay}-${p.id}`;
+            const on = !!state.completions[key];
+            const isMe = p.id === me.id;
+            const style = on ? `background:${p.color};border-color:${p.color}` : '';
+            return `<div class="person-check-pill ${on?'on':''} ${isMe?'':'locked'}" style="${style}" ${isMe?`data-ctoggle="${key}"`:''}>
+              <span class="dot" style="background:${on?'white':p.color}"></span>${escapeHtml(p.name)}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+
+function renderPlan() {
+  let html = '';
+  html += `<div class="section" style="padding-top:18px;"><div class="section-title">📝 Assign Chores for Next Week</div>
+    <div class="card" style="padding:10px 14px;"><div style="font-size:12.5px;color:var(--ink-soft);line-height:1.45;">
+      Type who's responsible for each chore. Once everyone signs off below, tap <b>Start This Week</b> to make it live.
+    </div></div></div>`;
+
+  const sections = [...new Set(CHORES.map(c=>c.section))];
+  sections.forEach(secName => {
+    const choresInSection = CHORES.filter(c => c.section===secName);
+    const color = choresInSection[0].color;
+    html += `<div class="section" style="padding-top:6px;"><div class="chore-card">
+      <div class="chore-section-head" style="background:${color}">${escapeHtml(secName)}</div>`;
+    choresInSection.forEach(chore => {
+      const val = state.nextWeek.responsible[chore.id] || '';
+      html += `<div class="plan-row">
+        <div class="plan-name">${escapeHtml(chore.name)}</div>
+        <div class="plan-rule">${escapeHtml(chore.rule)}</div>
+        <input class="plan-input" type="text" placeholder="Who's responsible?" value="${escapeHtml(val)}" data-plan="${chore.id}" />
+      </div>`;
+    });
+    html += `</div></div>`;
+  });
+
+  const allSigned = state.people.every(p => state.nextWeek.signOffs[p.id]);
+  html += `<div class="signoff-card">
+    <div class="signoff-title">✋ Everyone Sign Off</div>
+    <div class="signoff-sub">Once everyone agrees to their chores for next week, tap your name to sign. When all have signed, you can start the week.</div>
+    <div class="signoff-people">
+      ${state.people.map(p => {
+        const signed = !!state.nextWeek.signOffs[p.id];
+        const isMe = p.id === me.id;
+        return `<div class="signoff-pill ${signed?'signed':''}">
+          <div class="signoff-pill-left"><span class="me-dot" style="background:${p.color}"></span>${escapeHtml(p.name)}</div>
+          ${isMe
+            ? `<button class="signoff-btn ${signed?'signed-btn':'unsigned'}" data-signoff="${p.id}">${signed?'✓ Signed':'Tap to sign'}</button>`
+            : `<span class="signoff-btn disabled">${signed?'✓ Signed':'Waiting…'}</span>`}
+        </div>`;
+      }).join('')}
+    </div>
+    <button class="start-week-btn ${allSigned?'ready':'not-ready'}" id="start-week-btn" ${allSigned?'':'disabled'}>
+      ${allSigned ? '🚀 Start This Week' : `Waiting on ${state.people.filter(p=>!state.nextWeek.signOffs[p.id]).map(p=>p.name).join(', ')}`}
+    </button>
+  </div>`;
+
+  html += `<div class="section"><div class="section-title">🗒️ Notes for Next Week</div>
+    <div class="card notes-card"><textarea id="notes-input" placeholder="e.g. Jessica traveling Thu–Fri, trash day moved to Friday...">${escapeHtml(state.nextWeek.notes || '')}</textarea></div></div>`;
+
+  return html;
+}
+
+function renderIdentityModal() {
+  document.getElementById('app').innerHTML = `
+    <div class="modal-overlay"><div class="modal">
+      <h2>👋 Who are you?</h2>
+      <p>Type your name so your checkmarks show up under you. We'll remember you on this phone.</p>
+      <input id="name-input" type="text" placeholder="Your first name" autofocus />
+      <button id="name-submit-btn">Continue</button>
+    </div></div>`;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   EVENT HANDLERS
+   ════════════════════════════════════════════════════════════════ */
+function attachHandlers() {
+  document.querySelectorAll('.tab').forEach(el => el.onclick = () => { activeTab = el.dataset.tab; render(); });
+  document.querySelectorAll('.day-pill').forEach(el => el.onclick = () => { selectedDay = el.dataset.day; render(); });
+
+  const weekInput = document.getElementById('week-input');
+  if (weekInput) weekInput.onblur = async () => { state.weekOf = weekInput.value; await saveState(); };
+
+  const meBadge = document.getElementById('me-badge-btn');
+  if (meBadge) meBadge.onclick = () => openSwitchModal();
+
+  document.querySelectorAll('[data-ptask]').forEach(el => el.onclick = async () => {
+    const key = el.dataset.ptask;
+    state.personalDone[key] = !state.personalDone[key];
+    await saveState(); render();
+  });
+
+  document.querySelectorAll('[data-ctoggle]').forEach(el => el.onclick = async () => {
+    const key = el.dataset.ctoggle;
+    state.completions[key] = !state.completions[key];
+    await saveState(); render();
+  });
+
+  document.querySelectorAll('[data-plan]').forEach(el => el.onblur = async () => {
+    state.nextWeek.responsible[el.dataset.plan] = el.value;
+    await saveState();
+  });
+
+  const notesEl = document.getElementById('notes-input');
+  if (notesEl) notesEl.onblur = async () => { state.nextWeek.notes = notesEl.value; await saveState(); };
+
+  document.querySelectorAll('[data-signoff]').forEach(el => el.onclick = async () => {
+    const pid = el.dataset.signoff;
+    state.nextWeek.signOffs[pid] = !state.nextWeek.signOffs[pid];
+    await saveState(); render();
+  });
+
+  const startBtn = document.getElementById('start-week-btn');
+  if (startBtn && !startBtn.disabled) {
+    startBtn.onclick = async () => {
+      state.responsible = Object.assign({}, state.nextWeek.responsible);
+      state.weekOf = state.nextWeek.weekOf || state.weekOf;
+      state.notes = state.nextWeek.notes || '';
+      state.completions = {};
+      state.personalDone = {};
+      state.nextWeek = { weekOf:'', responsible:{}, signOffs:{}, notes:'' };
+      await saveState();
+      activeTab = 'today';
+      showToast('New week started! 🎉');
+      render();
+    };
+  }
+
+  const nameInput = document.getElementById('name-input');
+  const nameSubmit = document.getElementById('name-submit-btn');
+  if (nameInput && nameSubmit) {
+    const submit = async () => {
+      const person = findOrCreatePerson(nameInput.value);
+      if (!person) { nameInput.focus(); return; }
+      me = { id: person.id, name: person.name };
+      saveMe();
+      await saveState();
+      render();
+    };
+    nameSubmit.onclick = submit;
+    nameInput.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+  }
+}
+
+function openSwitchModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal"><h2>Switch person</h2><p>Not you? Pick your name or add a new person.</p>
+      <div class="modal-switch-list">
+        ${state.people.map(p => `<div class="modal-switch-opt" data-switch-to="${p.id}">
+          <span class="dot" style="background:${p.color}"></span>${escapeHtml(p.name)}</div>`).join('')}
+      </div>
+      <button class="modal-link" id="add-person-link">+ Someone else</button>
+      <div style="height:10px;"></div>
+      <button id="close-switch-btn" style="background:#EEF1F5;color:var(--ink-soft);">Cancel</button>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelectorAll('[data-switch-to]').forEach(el => el.onclick = () => {
+    const person = state.people.find(p => p.id === el.dataset.switchTo);
+    me = { id: person.id, name: person.name };
+    saveMe();
+    document.body.removeChild(overlay);
+    render();
+  });
+  document.getElementById('add-person-link').onclick = () => { document.body.removeChild(overlay); me = null; render(); };
+  document.getElementById('close-switch-btn').onclick = () => document.body.removeChild(overlay);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════ */
+function init() {
+  loadMe();
+  initFirebase();
+  if (configError) { render(); return; }
+  listenToState();
+  // safety timeout in case Firebase never responds (bad config, network, etc.)
+  setTimeout(() => {
+    if (!firstLoadDone) {
+      firstLoadDone = true;
+      syncStatus = 'err';
+      state = state || freshState();
+      render();
+    }
+  }, 6000);
+}
+
+init();
+</script>
+</body>
+</html>
