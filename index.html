@@ -1,0 +1,1637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ChoreBoard</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-database-compat.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #F4F6F9; }
+  ::-webkit-scrollbar { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  input, textarea, button, select { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCutb5gF5dD9WIU2EE1amjbxtzQ75DBzJo",
+  authDomain: "choreboard-70408.firebaseapp.com",
+  databaseURL: "https://choreboard-70408-default-rtdb.firebaseio.com",
+  projectId: "choreboard-70408",
+  storageBucket: "choreboard-70408.firebasestorage.app",
+  messagingSenderId: "567924294979",
+  appId: "1:567924294979:web:937be287040b3729a59bf6"
+};
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.database();
+window.storage = {
+  get: async (key, shared) => {
+    if (!shared) {
+      const val = localStorage.getItem('cb_' + key);
+      return val ? { value: val } : null;
+    }
+    return new Promise((res) => {
+      db.ref('shared/' + key).once('value', snap => {
+        const val = snap.val();
+        res(val !== null ? { value: JSON.stringify(val) } : null);
+      }, () => res(null));
+    });
+  },
+  set: async (key, value, shared) => {
+    if (!shared) {
+      localStorage.setItem('cb_' + key, value);
+      return { value };
+    }
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    await db.ref('shared/' + key).set(parsed);
+    return { value };
+  },
+  delete: async (key, shared) => {
+    if (!shared) { localStorage.removeItem('cb_' + key); return { deleted: true }; }
+    await db.ref('shared/' + key).remove();
+    return { deleted: true };
+  }
+};
+</script>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+
+const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const DAY_FULL = {Mon:'Monday',Tue:'Tuesday',Wed:'Wednesday',Thu:'Thursday',Fri:'Friday',Sat:'Saturday',Sun:'Sunday'};
+const TODAY_IDX = (new Date().getDay() + 6) % 7;
+
+const DEFAULT_PEOPLE = [
+  { id:'jayden',  name:'Jayden',  color:'#1A6B9A' },
+  { id:'michael', name:'Michael', color:'#1E8449' },
+  { id:'jessica', name:'Jessica', color:'#7D3C98' },
+];
+
+const RULES = [
+  'Clean up after yourself — inside and outside the house.',
+  'Everyone handles their own dishes throughout the day.',
+  'Wash hands when you come home.',
+  'Dishes = washed AND put away before dinner prep begins.',
+  'Dishes put away must be organized — proper place, not just stacked.',
+  'If you cook on the grill, you clean the grill.',
+];
+
+const PERSONAL_TASKS = {
+  jayden:  [
+    { id:'bed',      text:'Make bed' },
+    { id:'items',    text:'Pick up personal items' },
+    { id:'dishes',   text:'Personal dishes/cup' },
+    { id:'sink',     text:'Wipe sink/counter' },
+    { id:'reset',    text:'Room reset' },
+    { id:'poop',     text:'Pick up the poop',       note:'Main responsibility' },
+    { id:'laundry',  text:'Laundry (1-2 loads)',    note:'Washed & put away', laundry:true },
+    { id:'trashcan', text:'Take trash can to street', note:'Monday night', days:['Mon'] },
+    { id:'recycle',  text:'Take recycling to street', note:'Thursday night', days:['Thu'] },
+  ],
+  michael: [
+    { id:'bed',     text:'Make bed' },
+    { id:'items',   text:'Pick up personal items' },
+    { id:'dishes',  text:'Personal dishes/cup' },
+    { id:'sink',    text:'Wipe sink/counter' },
+    { id:'reset',   text:'Room reset' },
+    { id:'plants',  text:'Take care of plants' },
+    { id:'laundry', text:'Laundry (1-2 loads)', note:'Washed & put away', laundry:true },
+  ],
+  jessica: [
+    { id:'bed',     text:'Make bed' },
+    { id:'items',   text:'Pick up personal items' },
+    { id:'dishes',  text:'Personal dishes/cup' },
+    { id:'sink',    text:'Wipe sink/counter' },
+    { id:'reset',   text:'Room reset' },
+    { id:'poop',    text:'Pick up the poop', note:'Helps Jayden' },
+    { id:'curly',   text:'Bath & haircut for Curly', note:'Every 2 weeks \u2014 biweekly', biweekly:true },
+    { id:'laundry', text:'Laundry (1-2 loads)', note:'Washed & put away', laundry:true },
+  ],
+};
+
+// Laundry schedule \u2014 one person per day so nobody collides on the machines
+const DEFAULT_LAUNDRY = { michael:'Mon', jayden:'Wed', jessica:'Fri' };
+const laundryDayFor = (pid, state) => (state?.laundrySchedule?.[pid]) || DEFAULT_LAUNDRY[pid] || null;
+
+// Coffee table \u2014 Jessica & Michael only, auto-defaults to whoever is NOT cooking
+const COFFEE_ELIGIBLE = ['jessica','michael'];
+
+// Biweekly helper — tasks marked biweekly only appear on even-numbered weeks of the cycle
+const weekParity = (state) => ((state?.history||[]).length % 2);
+const isTaskActive = (t, day, state, pid) => {
+  if (t.laundry) return laundryDayFor(pid, state) === day;
+  return isTaskOn(t, day) && (!t.biweekly || weekParity(state) === 0);
+};
+
+const DINNER_IDS       = ['cook','afterdish','afterkitchen'];
+const DINNER_BLOCK_IDS = ['cook','afterdish','afterkitchen'];
+const SKIP_IDS         = [...DINNER_IDS, 'sweepmop'];
+
+const DINNER_BLOCK_META = [
+  { id:'cook',         label:'Cook dinner',                 sub:'Full meal. If grill used, cook cleans it.', isCook:true },
+  { id:'afterdish',    label:'After dinner dishes',         sub:'Washed, dried & put away — organized.' },
+  { id:'afterkitchen', label:'After dinner kitchen clean',  sub:'Counters + food away + stove + microwave + wipe coffee table + trash.' },
+];
+
+const CHORES = [
+  { id:'coffeetable_pre', section:'Daily Chores',  color:'#2E7FB8', name:'Wipe down coffee table',        rule:'Jessica & Michael only — defaults to whoever is NOT cooking that night.', days:'all', type:'shared', only:COFFEE_ELIGIBLE },
+  { id:'cook',            section:'Daily Chores',  color:'#2E7FB8', name:'Cook dinner',                   rule:'Full meal served. If the grill was used, the cook cleans it.', days:'all', type:'shared' },
+  { id:'afterdish',       section:'Daily Chores',  color:'#2E7FB8', name:'After dinner dishes',           rule:'Washed, dried & put away — organized in proper place.', days:'all', type:'shared' },
+  { id:'afterkitchen',    section:'Daily Chores',  color:'#2E7FB8', name:'After dinner kitchen clean',    rule:'Counters + food away + stove + microwave + wipe coffee table + trash.', days:'all', type:'shared' },
+  { id:'sweepmop',        section:'Daily Chores',  color:'#2E7FB8', name:'Sweep & Mop (Kitchen + Living)',rule:'Everyone does this — pick at least 1 day each. Full sweep then mop.', days:'all', type:'everyone' },
+  { id:'toilet',   section:'Weekly Chores', color:'#1E8449', name:'Bathroom — Clean toilet',         rule:'Bowl, seat, lid & base fully scrubbed. Everyone does their own — pick your day.', days:'all', type:'personal' },
+  { id:'tub',      section:'Weekly Chores', color:'#1E8449', name:'Bathroom — Clean bathtub/shower', rule:'Tub & walls fully scrubbed & rinsed. Everyone does their own — pick your day.', days:'all', type:'personal' },
+  { id:'fridge',   section:'Weekly Chores', color:'#1E8449', name:'Clean refrigerator',              rule:'Remove old food, wipe all shelves. Pick any day.', days:'all', type:'shared' },
+  { id:'sheets',   section:'Weekly Chores', color:'#1E8449', name:'Change bed sheets',               rule:'Removed, washed & put back on. Everyone does their own — pick your day.', days:'all', type:'personal' },
+  { id:'trash',    section:'Weekly Chores', color:'#1E8449', name:'Empty all trash cans',            rule:'All cans emptied & relined. Pick any day.', days:'all', type:'shared' },
+  { id:'backyard', section:'Yard / Extra',  color:'#B8860B', name:'Backyard maintenance',            rule:'Pick up, sweep & tidy — no clutter. Anyone can help — the more the better!', days:'all', type:'group' },
+  { id:'bbq',      section:'Yard / Extra',  color:'#B8860B', name:'Clean BBQ',                      rule:'Grates scrubbed, grease tray emptied. Anyone can help.', days:'all', type:'group' },
+  { id:'garage',   section:'Yard / Extra',  color:'#B8860B', name:'Clean garage',                   rule:'Swept, items off floor & stored. Anyone can help — the more the better!', days:'all', type:'group' },
+];
+
+const choreDays = (c) => c.days === 'all' ? DAYS : c.days;
+const isTaskOn  = (t, day) => !t.days || t.days.includes(day);
+
+// ── Pinch Hitter ─────────────────────────────────────────────────────────────
+const PINCH_LIMIT = 3; // max pinch-hitter uses per person per week
+
+// ── Completion scoring (drives pick order) ───────────────────────────────────
+function completionScore(pid, state) {
+  const tasks = PERSONAL_TASKS[pid] || [];
+  let total = 0, done = 0;
+  DAYS.forEach(day => {
+    tasks.filter(t => isTaskActive(t, day, state, pid)).forEach(t => {
+      total++;
+      if (state.personalDone?.[`${pid}-${t.id}-${day}`]) done++;
+    });
+  });
+  CHORES.forEach(c => choreDays(c).forEach(day => {
+    if ((state.choreAssignments?.[c.id] || {})[day] === pid) {
+      total++;
+      if (state.completions?.[`${c.id}-${day}-${pid}`]) done++;
+    }
+    // everyone/group chores live in groupHelpers
+    if ((c.type === 'everyone' || c.type === 'group') && state.groupHelpers?.[c.id]?.[day]?.[pid]) {
+      total++;
+      if (state.completions?.[`${c.id}-${day}-${pid}`]) done++;
+    }
+  }));
+  return { total, done, pct: total ? Math.round(done / total * 100) : 0 };
+}
+
+// Rank people best → worst. The lowest scorer picks LAST.
+function pickOrder(state) {
+  return [...(state.people || [])]
+    .map(p => ({ ...p, ...completionScore(p.id, state) }))
+    .sort((a, b) => b.pct - a.pct || b.done - a.done);
+}
+
+// Pick order = LAST SAY, not a lock. Anyone can pick any time.
+// Whoever completed the MOST chores ranks highest and may override someone below them.
+function pickStatus(meId, state) {
+  const order = pickOrder(state);
+  const myIdx = Math.max(0, order.findIndex(p => p.id === meId));
+  const myRank = myIdx;
+  // I can override anyone ranked BELOW me (i.e. who did fewer chores)
+  const canOverride = (otherId) => {
+    const oIdx = order.findIndex(p => p.id === otherId);
+    return oIdx > myRank;
+  };
+  return { order, myRank, canOverride, topName: order[0]?.name };
+}
+
+// Auto-assign a random open project to whoever never volunteered
+function randomProjectFor(pid, projects) {
+  const open = (projects || []).filter(p => p.status === 'open' && !(p.helpers || []).includes(pid));
+  if (!open.length) return null;
+  return open[Math.floor(Math.random() * open.length)];
+}
+
+// Personal chore ids — each person does their own
+const PERSONAL_CHORE_IDS = CHORES.filter(c=>c.type==='personal').map(c=>c.id);
+// Group chore ids — multiple helpers
+const GROUP_CHORE_IDS = CHORES.filter(c=>c.type==='group').map(c=>c.id);
+// Everyone chores — every person picks their own day(s), stored like groupHelpers
+const EVERYONE_CHORE_IDS = CHORES.filter(c=>c.type==='everyone').map(c=>c.id);
+
+function checkSignoff(meId, plan, projects) {
+  const ca = plan.choreAssignments || {};
+  const pca = plan.personalChoreAssignments || {};
+  const gh  = plan.groupHelpers || {};
+  const myCount = (id) => Object.entries(ca[id]||{}).filter(([,pid])=>pid===meId).length;
+  const hasDinner = DINNER_IDS.some(id => myCount(id) > 0);
+  const hasSweep  = DAYS.some(d => gh['sweepmop']?.[d]?.[meId]);
+  // "other" = any shared non-dinner/sweep chore, or a personal chore assigned, or helping a group chore, or project
+  const hasSharedOther = CHORES.filter(c=>!SKIP_IDS.includes(c.id)&&c.type==='shared').some(c=>myCount(c.id)>0);
+  const hasPersonalChore = PERSONAL_CHORE_IDS.some(id => pca[meId]?.[id]);
+  const isHelpingGroup = GROUP_CHORE_IDS.some(id => DAYS.some(d => (gh[id]?.[d]?.[meId])));
+  const hasCoffee = myCount('coffeetable_pre') > 0;
+  const helpingProject = (projects||[]).some(p=>p.status==='open'&&(p.helpers||[]).includes(meId));
+  const hasOther = hasSharedOther || hasPersonalChore || isHelpingGroup || helpingProject || hasCoffee;
+  const missing = [];
+  if (!hasDinner) missing.push('Pick at least one: Cook dinner, After dinner dishes, or Kitchen clean');
+  if (!hasSweep)  missing.push('Pick at least 1 Sweep & Mop day \u2014 everyone does this one');
+  if (!hasOther)  missing.push('Pick a Weekly chore, personal chore, help on a group chore, or offer to help on a Project');
+  return { valid: missing.length === 0, missing };
+}
+
+function freshPlan() { return { weekOf:'', choreAssignments:{}, personalChoreAssignments:{}, groupHelpers:{}, signOffs:{}, notes:'', tradeRequests:[] }; }
+function fresh() {
+  return {
+    weekOf:'', people:DEFAULT_PEOPLE, notes:'',
+    choreAssignments:{}, completions:{}, personalDone:{},
+    groupHelpers:{}, personalChoreAssignments:{},
+    notifications:[], pinchRequests:[], pinchCounts:{}, laundrySchedule:{...DEFAULT_LAUNDRY},
+    weekPlans:[freshPlan(),freshPlan(),freshPlan(),freshPlan()],
+    projects:[{
+      id:'default-organize', title:'Organize cabinets & closets',
+      summary:'Sort everything, clear the floor, make sure all doors close fully.',
+      startDate:'', endDate:'', submittedBy:'michael',
+      submittedAt:new Date().toISOString(), helpers:[], status:'open', recurring:true,
+    }],
+    history:[],
+  };
+}
+function migrate(raw) {
+  const f = fresh();
+  const out = { ...f, ...raw,
+    choreAssignments:raw.choreAssignments||{}, completions:raw.completions||{},
+    personalDone:raw.personalDone||{}, history:raw.history||[], people:raw.people?.length?raw.people:DEFAULT_PEOPLE,
+    groupHelpers:raw.groupHelpers||{}, personalChoreAssignments:raw.personalChoreAssignments||{},
+    notifications:raw.notifications||[], pinchRequests:raw.pinchRequests||[], pinchCounts:raw.pinchCounts||{},
+    laundrySchedule:{...DEFAULT_LAUNDRY,...(raw.laundrySchedule||{})},
+  };
+  const existing = raw.projects||[];
+  out.projects = existing.find(p=>p.id==='default-organize') ? existing : [f.projects[0],...existing];
+  const migratePlan = (p) => ({...freshPlan(),...p, personalChoreAssignments:p?.personalChoreAssignments||{}, groupHelpers:p?.groupHelpers||{}});
+  out.weekPlans = (raw.weekPlans&&Array.isArray(raw.weekPlans)&&raw.weekPlans.length===4)
+    ? raw.weekPlans.map(migratePlan)
+    : raw.nextWeek ? [migratePlan(raw.nextWeek),freshPlan(),freshPlan(),freshPlan()]
+    : [freshPlan(),freshPlan(),freshPlan(),freshPlan()];
+  return out;
+}
+
+
+const SK='cb-v1-state'; const MK='cb-v1-me';
+const N={navy:'#16263B',navyL:'#223955',blue:'#2E7FB8',ink:'#1C2330',inkS:'#5B6577',inkF:'#9AA3B2',line:'#DDE3EC',bg:'#F4F6F9',good:'#1E8449'};
+const WEEK_LABELS=['Next Week','2 Weeks Out','3 Weeks Out','4 Weeks Out'];
+
+// ── Primitives ────────────────────────────────────────────────────────────────
+const Dot = ({color,sz=9}) => <span style={{width:sz,height:sz,borderRadius:'50%',background:color,display:'inline-block',flexShrink:0}}/>;
+const Card = ({children,style}) => <div style={{background:'white',borderRadius:14,padding:14,boxShadow:'0 1px 2px rgba(20,30,50,0.06)',marginBottom:12,border:`1px solid ${N.line}`,...style}}>{children}</div>;
+const Sec  = ({title,children}) => <div style={{padding:'16px 14px 4px'}}><div style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.08em',textTransform:'uppercase',color:N.inkS,marginBottom:8}}>{title}</div>{children}</div>;
+const SecHead = ({color,children,right}) => <div style={{padding:'8px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',background:color}}><span style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.05em',textTransform:'uppercase',color:'white'}}>{children}</span>{right&&<span style={{fontSize:10,color:'rgba(255,255,255,0.8)',fontWeight:600}}>{right}</span>}</div>;
+const ProgressBar = ({pct,color}) => <div style={{background:'#F0F2F6',borderRadius:20,height:6,overflow:'hidden'}}><div style={{height:'100%',background:color,borderRadius:20,width:`${pct}%`,transition:'width 0.3s'}}/></div>;
+const Modal = ({children,onClose}) => (
+  <div style={{position:'fixed',inset:0,background:'rgba(15,22,35,0.55)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:24}} onClick={onClose}>
+    <div style={{background:'white',borderRadius:18,padding:'26px 22px',maxWidth:380,width:'100%',textAlign:'center'}} onClick={e=>e.stopPropagation()}>{children}</div>
+  </div>
+);
+const Check = ({checked,onChange,disabled,color}) => (
+  <div onClick={disabled?undefined:onChange}
+    style={{width:24,height:24,borderRadius:7,border:`2px solid ${checked?(color||N.good):N.line}`,flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',cursor:disabled?'default':'pointer',background:checked?(color||N.good):'white',marginTop:1}}>
+    {checked && <svg width={14} height={14} viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+  </div>
+);
+
+function Spinner() {
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:10,color:N.inkS,fontSize:14,background:N.bg,fontFamily:'-apple-system,sans-serif'}}>
+      <style>{'@keyframes spin{to{transform:rotate(360deg)}}'}</style>
+      <div style={{width:28,height:28,borderRadius:'50%',border:`3px solid ${N.line}`,borderTopColor:N.blue,animation:'spin 0.8s linear infinite'}}/>
+      Loading...
+    </div>
+  );
+}
+
+function Identity({state,onSet}) {
+  const [name,setName] = useState('');
+  const submit = () => {
+    const c = name.trim(); if(!c) return;
+    let p = state?.people?.find(x=>x.name.toLowerCase()===c.toLowerCase());
+    if(!p){const pal=['#C0392B','#2980B9','#27AE60','#8E44AD','#D68910','#16A085'];const id=c.toLowerCase().replace(/[^a-z0-9]/g,'')||('p'+Date.now());p={id,name:c,color:pal[(state?.people?.length||0)%pal.length]};}
+    onSet(p);
+  };
+  return (
+    <Modal>
+      <h2 style={{margin:'0 0 6px',fontSize:20,color:N.navy}}>Who are you?</h2>
+      <p style={{margin:'0 0 14px',fontSize:13.5,color:N.inkS,lineHeight:1.4}}>Tap your name or type a new one.</p>
+      {state?.people?.map(p=>(
+        <div key={p.id} onClick={()=>onSet(p)} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 14px',borderRadius:10,border:`1.5px solid ${N.line}`,cursor:'pointer',fontWeight:600,fontSize:14,marginBottom:8}}>
+          <Dot color={p.color} sz={10}/>{p.name}
+        </div>
+      ))}
+      <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} placeholder="Or type a new name..."
+        style={{width:'100%',padding:'12px 14px',borderRadius:10,border:`1.5px solid ${N.line}`,fontSize:15,outline:'none',margin:'8px 0 12px',textAlign:'center'}}/>
+      <button onClick={submit} style={{width:'100%',padding:12,borderRadius:10,border:'none',background:N.navy,color:'white',fontSize:14.5,fontWeight:700,cursor:'pointer'}}>Continue</button>
+    </Modal>
+  );
+}
+
+// ── Root App ──────────────────────────────────────────────────────────────────
+function App() {
+  const [state,setState]   = useState(null);
+  const [me,setMe]         = useState(null);
+  const [tab,setTab]       = useState('today');
+  const [day,setDay]       = useState(DAYS[TODAY_IDX]);
+  const [planWeek,setPlanWeek] = useState(0);
+  const [loading,setLoading]   = useState(true);
+  const [saving,setSaving]     = useState(false);
+  const [switchOpen,setSwitchOpen] = useState(false);
+  const [toast,setToast]   = useState(null);
+  const [histExpanded,setHistExpanded] = useState(null);
+  const [signoffError,setSignoffError] = useState(null);
+
+  const toast$ = (msg) => { setToast(msg); setTimeout(()=>setToast(null),2400); };
+
+  useEffect(()=>{
+    (async()=>{
+      try {
+        const [sr,mr] = await Promise.all([
+          window.storage.get(SK,true).catch(()=>null),
+          window.storage.get(MK,false).catch(()=>null),
+        ]);
+        setState(sr?.value ? migrate(JSON.parse(sr.value)) : fresh());
+        setMe(mr?.value ? JSON.parse(mr.value) : null);
+      } catch { setState(fresh()); }
+      setLoading(false);
+    })();
+    const iv = setInterval(async()=>{
+      try {
+        const r = await window.storage.get(SK,true);
+        if(r?.value) setState(prev=>{const next=migrate(JSON.parse(r.value));return JSON.stringify(prev)===JSON.stringify(next)?prev:next;});
+      } catch {}
+    },7000);
+    return ()=>clearInterval(iv);
+  },[]);
+
+  const persist = useCallback(async(s)=>{setSaving(true);try{await window.storage.set(SK,JSON.stringify(s),true);}catch{}setSaving(false);},[]);
+  const upd = useCallback((fn)=>{setState(prev=>{const next=fn(prev);persist(next);return next;});},[persist]);
+  const saveMe = async(p)=>{const m={id:p.id,name:p.name};setMe(m);try{await window.storage.set(MK,JSON.stringify(m),false);}catch{}};
+
+  if (loading) return <Spinner/>;
+  if (!state)  return <Spinner/>;
+  if (!me) return <Identity state={state} onSet={async(p)=>{if(!state.people.find(x=>x.id===p.id)){const next={...state,people:[...state.people,p]};setState(next);await persist(next);}await saveMe(p);}}/>;
+
+  const myP = state.people.find(p=>p.id===me.id)||{color:'#2E7FB8',name:me.name};
+  const pendTrades = (state.weekPlans[planWeek]?.tradeRequests||[]).filter(t=>t.to===me.id&&t.status==='pending').length;
+  const openProjects = (state.projects||[]).filter(p=>p.status==='open').length;
+
+  return (
+    <div style={{maxWidth:560,margin:'0 auto',minHeight:'100vh',paddingBottom:90,background:N.bg,fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif',fontSize:14}}>
+      <style>{`*{box-sizing:border-box}input,textarea,button,select{font-family:inherit}::-webkit-scrollbar{display:none}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+
+      {/* Topbar */}
+      <div style={{background:`linear-gradient(135deg,${N.navy},${N.navyL})`,color:'white',padding:'18px 18px 14px',position:'sticky',top:0,zIndex:30}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div style={{fontSize:22,fontWeight:800,letterSpacing:-0.5}}>CHORE<span style={{color:'#7FC4F0'}}>BOARD</span></div>
+          <button onClick={()=>setSwitchOpen(true)} style={{display:'flex',alignItems:'center',gap:6,background:'rgba(255,255,255,0.12)',borderRadius:20,padding:'5px 10px 5px 6px',fontSize:12.5,fontWeight:600,cursor:'pointer',border:'none',color:'white'}}>
+            <Dot color={myP.color} sz={9}/>{me.name}
+          </button>
+        </div>
+        <div style={{marginTop:10,display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:11,fontWeight:700,letterSpacing:'0.06em',color:'#9FC9EA',textTransform:'uppercase'}}>Week of</span>
+          <input key={state.weekOf} defaultValue={state.weekOf} onBlur={e=>upd(s=>({...s,weekOf:e.target.value}))} placeholder="e.g. Jun 30"
+            style={{flex:1,background:'rgba(255,255,255,0.1)',border:'1px solid rgba(255,255,255,0.18)',borderRadius:8,color:'white',padding:'7px 10px',fontSize:13,outline:'none'}}/>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:5,fontSize:10.5,color:'#9FC9EA',marginTop:8}}>
+          <span style={{width:6,height:6,borderRadius:'50%',background:saving?'#FBBF24':'#4ADE80',display:'inline-block'}}/>{saving?'Saving...':'Synced'}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:'flex',background:N.navyL,position:'sticky',top:96,zIndex:29}}>
+        {[
+          {k:'today',   l:'This Week'},
+          {k:'plan',    l:`Plan${pendTrades?` (${pendTrades})`:''}`},
+          {k:'projects',l:`Projects${openProjects?` (${openProjects})`:''}`},
+          {k:'history', l:'History'},
+        ].map(t=>(
+          <button key={t.k} onClick={()=>setTab(t.k)}
+            style={{flex:1,textAlign:'center',padding:'10px 2px',fontSize:11.5,fontWeight:700,color:tab===t.k?'white':'rgba(255,255,255,0.55)',cursor:'pointer',background:'none',border:'none',borderBottom:`3px solid ${tab===t.k?'#7FC4F0':'transparent'}`}}>
+            {t.l}
+          </button>
+        ))}
+      </div>
+
+      {tab==='today'    && <Today    state={state} me={me} day={day} setDay={setDay} upd={upd} toast$={toast$}/>}
+      {tab==='plan'     && <Plan     state={state} me={me} planWeek={planWeek} setPlanWeek={setPlanWeek} upd={upd} toast$={toast$} signoffError={signoffError} setSignoffError={setSignoffError}/>}
+      {tab==='projects' && <Projects state={state} me={me} upd={upd} toast$={toast$}/>}
+      {tab==='history'  && <History  state={state} expanded={histExpanded} setExpanded={setHistExpanded}/>}
+
+      {switchOpen && (
+        <Modal onClose={()=>setSwitchOpen(false)}>
+          <h2 style={{margin:'0 0 6px',fontSize:20,color:N.navy}}>Switch person</h2>
+          <p style={{margin:'0 0 14px',fontSize:13.5,color:N.inkS}}>Who's using this phone?</p>
+          {state.people.map(p=>(
+            <div key={p.id} onClick={()=>{saveMe(p);setSwitchOpen(false);}}
+              style={{display:'flex',alignItems:'center',gap:10,padding:'11px 14px',borderRadius:11,border:`1.5px solid ${N.line}`,cursor:'pointer',fontWeight:700,fontSize:14,marginBottom:8}}>
+              <Dot color={p.color} sz={11}/>{p.name}
+            </div>
+          ))}
+          <button onClick={()=>setSwitchOpen(false)} style={{width:'100%',padding:12,borderRadius:10,border:'none',background:'#EEF1F5',color:N.inkS,fontSize:14,fontWeight:700,cursor:'pointer',marginTop:6}}>Cancel</button>
+        </Modal>
+      )}
+      {toast && <div style={{position:'fixed',bottom:18,left:'50%',transform:'translateX(-50%)',background:N.navy,color:'white',padding:'10px 18px',borderRadius:30,fontSize:13,fontWeight:600,zIndex:200,boxShadow:'0 4px 16px rgba(0,0,0,0.2)'}}>{toast}</div>}
+    </div>
+  );
+}
+
+// ── Today Tab ─────────────────────────────────────────────────────────────────
+function Today({state,me,day,setDay,upd,toast$}) {
+  const myPerson  = state.people.find(p=>p.id===me.id)||{color:'#2E7FB8',name:me.name};
+  const others    = state.people.filter(p=>p.id!==me.id);
+  const myTasks   = (PERSONAL_TASKS[me.id]||[]).filter(t=>isTaskActive(t,day,state,me.id));
+  const myDone    = myTasks.filter(t=>state.personalDone[`${me.id}-${t.id}-${day}`]).length;
+  const myPct     = myTasks.length ? Math.round(myDone/myTasks.length*100) : 100;
+
+  return (
+    <div>
+      <Notifications state={state} me={me} upd={upd}/>
+      <PinchRequests state={state} me={me} upd={upd} toast$={toast$}/>
+
+      {/* Day picker */}
+      <div style={{display:'flex',gap:6,padding:'12px 14px 4px',overflowX:'auto'}}>
+        {DAYS.map((d,i)=>(
+          <div key={d} onClick={()=>setDay(d)}
+            style={{flex:1,textAlign:'center',padding:'9px 0',borderRadius:10,fontSize:12,fontWeight:700,background:day===d?N.navy:'white',color:day===d?'white':N.inkS,border:`1px solid ${day===d?N.navy:N.line}`,cursor:'pointer',minWidth:38}}>
+            {d}{i===TODAY_IDX&&<span style={{display:'block',width:4,height:4,borderRadius:'50%',background:day===d?'#7FC4F0':N.blue,margin:'3px auto 0'}}/>}
+          </div>
+        ))}
+      </div>
+
+      {/* Rules */}
+      <Sec title="Rules of the House">
+        <Card>
+          {RULES.map((r,i)=>(
+            <div key={i} style={{display:'flex',gap:8,padding:'6px 0',fontSize:13.5,lineHeight:1.4,borderBottom:i<RULES.length-1?'1px solid #F5F6F8':'none'}}>
+              <span style={{color:N.blue,fontWeight:800,flexShrink:0}}>{i+1}.</span><span>{r}</span>
+            </div>
+          ))}
+        </Card>
+      </Sec>
+
+      {/* MY personal tasks — prominent, full card */}
+      <Sec title="My Tasks Today">
+        <div style={{borderRadius:14,overflow:'hidden',border:`2px solid ${myPerson.color}`,marginBottom:10}}>
+          <div style={{padding:'12px 14px',display:'flex',alignItems:'center',justifyContent:'space-between',background:myPerson.color,color:'white',fontWeight:800,fontSize:15}}>
+            <span>{myPerson.name} (you)</span>
+            <span style={{fontSize:12,fontWeight:700,background:'rgba(255,255,255,0.22)',padding:'3px 9px',borderRadius:20}}>{myPct}% done</span>
+          </div>
+          <div style={{background:'white',padding:'4px 6px'}}>
+            {myTasks.length === 0
+              ? <div style={{padding:'16px',textAlign:'center',color:N.inkF,fontSize:13}}>No tasks for {DAY_FULL[day]}</div>
+              : myTasks.map((t,ti)=>{
+                  const key=`${me.id}-${t.id}-${day}`;
+                  const checked=!!state.personalDone[key];
+                  return (
+                    <div key={t.id} style={{display:'flex',alignItems:'flex-start',gap:12,padding:'11px 10px',borderBottom:ti<myTasks.length-1?'1px solid #F0F2F6':'none'}}>
+                      <Check checked={checked} onChange={()=>upd(s=>({...s,personalDone:{...s.personalDone,[key]:!s.personalDone[key]}}))} color={myPerson.color}/>
+                      <div>
+                        <div style={{fontSize:14.5,lineHeight:1.35,textDecoration:checked?'line-through':'none',color:checked?N.inkF:N.ink,fontWeight:checked?400:500}}>{t.text}</div>
+                        {t.note&&<div style={{fontSize:11.5,color:N.inkF,fontStyle:'italic',marginTop:1}}>{t.note}</div>}
+                      </div>
+                    </div>
+                  );
+                })
+            }
+          </div>
+        </div>
+      </Sec>
+
+      {/* Others' tasks — compact side-by-side */}
+      {others.length > 0 && (
+        <Sec title="Others' Tasks">
+          <div style={{display:'grid',gridTemplateColumns:`repeat(${others.length},1fr)`,gap:8,marginBottom:12}}>
+            {others.map(p=>{
+              const tasks=(PERSONAL_TASKS[p.id]||[]).filter(t=>isTaskActive(t,day,state,p.id));
+              const done=tasks.filter(t=>state.personalDone[`${p.id}-${t.id}-${day}`]).length;
+              const pct=tasks.length?Math.round(done/tasks.length*100):100;
+              return (
+                <div key={p.id} style={{borderRadius:12,overflow:'hidden',border:`1.5px solid ${N.line}`}}>
+                  <div style={{padding:'8px 10px',background:p.color,color:'white',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span>{p.name}</span><span style={{fontSize:11,fontWeight:700,background:'rgba(255,255,255,0.2)',padding:'2px 6px',borderRadius:20}}>{pct}%</span>
+                  </div>
+                  <div style={{background:'white',padding:'6px 8px'}}>
+                    <ProgressBar pct={pct} color={p.color}/>
+                    <div style={{marginTop:7}}>
+                      {tasks.map(t=>{
+                        const checked=!!state.personalDone[`${p.id}-${t.id}-${day}`];
+                        return (
+                          <div key={t.id} style={{display:'flex',alignItems:'center',gap:5,padding:'3px 0',fontSize:11.5,color:checked?N.inkF:N.inkS,textDecoration:checked?'line-through':'none'}}>
+                            <span style={{width:6,height:6,borderRadius:'50%',background:checked?N.good:N.line,flexShrink:0,display:'inline-block'}}/>
+                            {t.text}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Sec>
+      )}
+
+      {/* Chores for today */}
+      <Sec title={`Chores — ${DAY_FULL[day]}`}>
+        <DinnerBlock state={state} me={me} day={day} upd={upd} toast$={toast$}/>
+        <NonDinnerChores state={state} me={me} day={day} upd={upd} toast$={toast$}/>
+      </Sec>
+    </div>
+  );
+}
+
+// ── Dinner Block (Today tab) ──────────────────────────────────────────────────
+function DinnerBlock({state,me,day,upd,toast$}) {
+  const [showReschedule, setShowReschedule] = useState(false);
+  const ca = state.choreAssignments || {};
+
+  const cookId   = ca['cook']?.[day];
+  const iAmCook  = cookId === me.id;
+  const hasDinnerToday = DINNER_BLOCK_IDS.some(id => ca[id]?.[day]);
+
+  // A day is available if no dinner-block chore is already claimed on it
+  const dayAvailable = (d) => !DINNER_BLOCK_IDS.some(id => ca[id]?.[d]);
+
+  const reschedule = (newDay) => {
+    const moved = DINNER_BLOCK_META
+      .filter(m => ca[m.id]?.[day])
+      .map(m => ({ label: m.label, owner: ca[m.id][day] }));
+    upd(s => {
+      const newCA = { ...s.choreAssignments };
+      DINNER_BLOCK_IDS.forEach(choreId => {
+        const m = { ...(newCA[choreId] || {}) };
+        if (m[day]) { m[newDay] = m[day]; delete m[day]; }
+        newCA[choreId] = m;
+      });
+      // Notify everyone affected (other than the cook who moved it)
+      const cookName = s.people.find(p => p.id === me.id)?.name || 'The cook';
+      const notes = moved
+        .filter(mv => mv.owner !== me.id)
+        .map(mv => ({
+          id: `${Date.now()}-${mv.label}`,
+          to: mv.owner,
+          text: `${cookName} moved dinner night from ${DAY_FULL[day]} to ${DAY_FULL[newDay]}. Your chore "${mv.label}" moved too.`,
+          at: new Date().toISOString(),
+          read: false,
+        }));
+      return { ...s, choreAssignments: newCA, notifications: [...(s.notifications || []), ...notes] };
+    });
+    setShowReschedule(false);
+    toast$(`Dinner moved to ${newDay} — everyone notified.`);
+  };
+
+  const DINNER_COLOR = '#6C3483';
+
+  return (
+    <div style={{borderRadius:14,overflow:'hidden',border:`1.5px solid ${DINNER_COLOR}33`,marginBottom:10,background:'white'}}>
+      <div style={{padding:'10px 14px',background:`linear-gradient(135deg,${DINNER_COLOR},#8E44AD)`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div>
+          <div style={{color:'white',fontWeight:800,fontSize:13.5,letterSpacing:'0.03em'}}>🍽️ DINNER BLOCK</div>
+          <div style={{color:'rgba(255,255,255,0.7)',fontSize:11,marginTop:2}}>These chores go together each evening</div>
+        </div>
+        {iAmCook && (
+          <button onClick={()=>setShowReschedule(!showReschedule)}
+            style={{background:'rgba(255,255,255,0.18)',color:'white',border:'1px solid rgba(255,255,255,0.3)',borderRadius:8,padding:'5px 10px',fontSize:11.5,fontWeight:700,cursor:'pointer'}}>
+            {showReschedule ? 'Cancel' : '📅 Reschedule'}
+          </button>
+        )}
+      </div>
+
+      {showReschedule && (
+        <div style={{padding:'12px 14px',background:'#F8F0FF',borderBottom:'1px solid #E8D5F5'}}>
+          <div style={{fontSize:12.5,fontWeight:700,color:DINNER_COLOR,marginBottom:8}}>Move dinner night to which day?</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            {DAYS.filter(d=>d!==day).map(d=>{
+              const open = dayAvailable(d);
+              return (
+                <button key={d} onClick={()=>open&&reschedule(d)} disabled={!open}
+                  style={{padding:'7px 12px',borderRadius:9,fontSize:12.5,fontWeight:700,cursor:open?'pointer':'not-allowed',background:open?DINNER_COLOR:'#E8E2EE',color:open?'white':'#A99CB4',border:'none'}}>
+                  {d}{!open&&' ✕'}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{fontSize:11,color:'#8E44AD',marginTop:8,lineHeight:1.4}}>
+            ℹ️ Dishes & kitchen clean move with it — everyone assigned gets a notification. Greyed days already have a dinner block.
+          </div>
+        </div>
+      )}
+
+      {!hasDinnerToday ? (
+        <div style={{padding:'16px 14px',textAlign:'center',color:N.inkF,fontSize:13}}>
+          No dinner chores planned for {DAY_FULL[day]}
+        </div>
+      ) : (
+        DINNER_BLOCK_META.map((meta, mi) => {
+          const owner   = ca[meta.id]?.[day];
+          const ownerP  = state.people.find(p=>p.id===owner);
+          if(!owner) return null; // skip chores not assigned today
+          const myKey   = `${meta.id}-${day}-${me.id}`;
+          const iDoneIt = !!state.completions[myKey];
+          const isMe    = owner === me.id;
+          return (
+            <div key={meta.id} style={{padding:'11px 14px',borderBottom:mi<DINNER_BLOCK_META.length-1?'1px solid #F4EBF8':'none',background:iDoneIt?'#FAFFFE':'white'}}>
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10}}>
+                <div style={{flex:1}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                    <div style={{fontSize:14,fontWeight:700,color:iDoneIt?N.inkF:N.ink,textDecoration:iDoneIt?'line-through':'none'}}>{meta.label}</div>
+                    {meta.isCook && <span style={{fontSize:9,background:`${DINNER_COLOR}18`,color:DINNER_COLOR,padding:'1px 6px',borderRadius:10,fontWeight:700,flexShrink:0}}>Cook</span>}
+                  </div>
+                  <div style={{fontSize:11.5,color:N.inkS,lineHeight:1.35}}>{meta.sub}</div>
+                  {ownerP && <div style={{fontSize:11,color:ownerP.color,fontWeight:600,marginTop:3}}>
+                    {ownerP.name}{isMe?' (you)':''}: {iDoneIt?'✓ done':'pending'}
+                  </div>}
+                  {isMe && !iDoneIt && <PinchBtn state={state} me={me} chore={{id:meta.id,name:meta.label}} day={day} upd={upd} toast$={toast$}/>}
+                </div>
+                {isMe && (
+                  <button onClick={()=>{upd(s=>({...s,completions:{...s.completions,[myKey]:!s.completions[myKey]}}));toast$(iDoneIt?'Unchecked':'Done!');}}
+                    style={{flexShrink:0,padding:'6px 11px',borderRadius:9,border:`1.5px solid ${iDoneIt?N.good:N.line}`,background:iDoneIt?N.good:'white',color:iDoneIt?'white':N.inkS,fontSize:12,fontWeight:700,cursor:'pointer',marginTop:2}}>
+                    {iDoneIt?'✓ Done':'Mark done'}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ── Notifications banner ──────────────────────────────────────────────────────
+function Notifications({state,me,upd}) {
+  const mine = (state.notifications||[]).filter(n=>n.to===me.id&&!n.read);
+  if(!mine.length) return null;
+  const dismiss = (id) => upd(s=>({...s,notifications:(s.notifications||[]).map(n=>n.id===id?{...n,read:true}:n)}));
+  return (
+    <div style={{margin:'12px 14px 0'}}>
+      {mine.map(n=>(
+        <div key={n.id} style={{display:'flex',gap:10,alignItems:'flex-start',background:'#FFF6E5',border:'1px solid #F0D08A',borderRadius:12,padding:'11px 13px',marginBottom:8}}>
+          <span style={{fontSize:15,flexShrink:0}}>🔔</span>
+          <div style={{flex:1,fontSize:12.5,color:'#6B4F0F',lineHeight:1.45}}>{n.text}</div>
+          <button onClick={()=>dismiss(n.id)} style={{flexShrink:0,background:'none',border:'none',color:'#B08B3A',fontSize:16,fontWeight:800,cursor:'pointer',lineHeight:1,padding:0}}>×</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Pinch Hitter requests (Today tab) ─────────────────────────────────────────
+function PinchRequests({state,me,upd,toast$}) {
+  const reqs = (state.pinchRequests||[]).filter(r=>r.status==='pending'&&r.from!==me.id&&!(r.approvals||[]).includes(me.id)&&!(r.declines||[]).includes(me.id));
+  if(!reqs.length) return null;
+
+  const respond = (reqId, approve) => upd(s=>{
+    const others = s.people.filter(p=>p.id!==(s.pinchRequests.find(r=>r.id===reqId)?.from)).length;
+    const notes=[...(s.notifications||[])];
+    const prs = (s.pinchRequests||[]).map(r=>{
+      if(r.id!==reqId) return r;
+      const approvals = approve ? [...(r.approvals||[]), me.id] : (r.approvals||[]);
+      const declines  = approve ? (r.declines||[]) : [...(r.declines||[]), me.id];
+      if(!approve){
+        notes.push({id:`${Date.now()}-d`,to:r.from,text:`${state.people.find(p=>p.id===me.id)?.name} declined your pinch-hitter request for "${CHORES.find(c=>c.id===r.choreId)?.name||r.choreId}".`,at:new Date().toISOString(),read:false});
+        return {...r,declines,status:'declined'};
+      }
+      return {...r,approvals,status: approvals.length>=others ? 'approved' : 'pending'};
+    });
+    const done = prs.find(r=>r.id===reqId);
+    let ca = s.choreAssignments, counts = {...(s.pinchCounts||{})};
+    if(done && done.status==='approved'){
+      ca = {...s.choreAssignments};
+      const m = {...(ca[done.choreId]||{})};
+      delete m[done.fromDay];
+      m[done.toDay] = done.from;
+      ca[done.choreId] = m;
+      counts[done.from] = (counts[done.from]||0) + 1;
+      notes.push({id:`${Date.now()}-a`,to:done.from,text:`Your pinch-hitter request was approved — "${CHORES.find(c=>c.id===done.choreId)?.name}" moved to ${DAY_FULL[done.toDay]}.`,at:new Date().toISOString(),read:false});
+    }
+    return {...s,pinchRequests:prs,choreAssignments:ca,pinchCounts:counts,notifications:notes};
+  });
+
+  return (
+    <div style={{margin:'12px 14px 0',background:'#EAF4FB',border:'1px solid #A9CFE6',borderRadius:14,padding:14}}>
+      <div style={{fontSize:12.5,fontWeight:800,color:'#1A5276',marginBottom:10}}>⚾ Pinch Hitter Requests</div>
+      {reqs.map(r=>{
+        const fromP=state.people.find(p=>p.id===r.from);
+        const chore=CHORES.find(c=>c.id===r.choreId);
+        return (
+          <div key={r.id} style={{marginBottom:10}}>
+            <div style={{fontSize:13,color:'#1A5276',lineHeight:1.45,marginBottom:6}}>
+              <b>{fromP?.name}</b> wants to push <b>{chore?.name}</b> from <b>{r.fromDay}</b> → <b>{r.toDay}</b>.
+              {r.reason && <span style={{fontStyle:'italic',color:'#5B6577'}}> "{r.reason}"</span>}
+            </div>
+            <div style={{display:'flex',gap:6}}>
+              <button onClick={()=>respond(r.id,true)} style={{background:N.good,color:'white',border:'none',borderRadius:8,padding:'5px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>Agree</button>
+              <button onClick={()=>respond(r.id,false)} style={{background:'white',color:'#C0392B',border:'1.5px solid #E8B4AE',borderRadius:8,padding:'5px 12px',fontSize:12,fontWeight:700,cursor:'pointer'}}>Decline</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Pinch Hitter button (inline on a chore) ───────────────────────────────────
+function PinchBtn({state,me,chore,day,upd,toast$}) {
+  const [open,setOpen] = useState(false);
+  const used = state.pinchCounts?.[me.id] || 0;
+  const left = PINCH_LIMIT - used;
+  const pending = (state.pinchRequests||[]).find(r=>r.choreId===chore.id&&r.fromDay===day&&r.from===me.id&&r.status==='pending');
+  const ca = state.choreAssignments||{};
+
+  const dayFree = (d) => !ca[chore.id]?.[d];
+
+  const request = (toDay) => {
+    upd(s=>({...s,pinchRequests:[...(s.pinchRequests||[]),{
+      id:Date.now().toString(), from:me.id, choreId:chore.id, fromDay:day, toDay,
+      status:'pending', approvals:[], declines:[], at:new Date().toISOString(),
+    }],
+      notifications:[...(s.notifications||[]),
+        ...s.people.filter(p=>p.id!==me.id).map(p=>({
+          id:`${Date.now()}-${p.id}`, to:p.id,
+          text:`${s.people.find(x=>x.id===me.id)?.name} requested a pinch hitter: move "${chore.name}" from ${DAY_FULL[day]} to ${DAY_FULL[toDay]}. Needs your OK.`,
+          at:new Date().toISOString(), read:false,
+        }))],
+    }));
+    setOpen(false);
+    toast$('Pinch hitter request sent — waiting on approval.');
+  };
+
+  if(pending) return <div style={{fontSize:11,color:'#1A5276',fontWeight:700,marginTop:6}}>⚾ Pinch request pending...</div>;
+
+  return (
+    <div style={{marginTop:6}}>
+      <button onClick={()=>left>0&&setOpen(!open)} disabled={left<=0}
+        style={{padding:'4px 10px',borderRadius:8,fontSize:11,fontWeight:700,cursor:left>0?'pointer':'not-allowed',background:'white',color:left>0?'#1A5276':N.inkF,border:`1.5px solid ${left>0?'#A9CFE6':N.line}`}}>
+        {left>0 ? (open?'Cancel':`⚾ Pinch Hitter (${left} left)`) : '⚾ No pinch hits left'}
+      </button>
+      {open && (
+        <div style={{marginTop:8,background:'#F4FAFD',border:'1px solid #C9E2F0',borderRadius:10,padding:'10px 12px'}}>
+          <div style={{fontSize:11.5,fontWeight:700,color:'#1A5276',marginBottom:7}}>Push this chore to an open day:</div>
+          <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
+            {DAYS.filter(d=>d!==day).map(d=>{
+              const free=dayFree(d);
+              return (
+                <button key={d} onClick={()=>free&&request(d)} disabled={!free}
+                  style={{padding:'5px 10px',borderRadius:7,fontSize:11.5,fontWeight:700,cursor:free?'pointer':'not-allowed',background:free?'#2E7FB8':'#E3E8EC',color:free?'white':'#A3ADB6',border:'none'}}>
+                  {d}{!free&&' ✕'}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{fontSize:10.5,color:'#5B6577',marginTop:7,lineHeight:1.4}}>Everyone else must agree. Max {PINCH_LIMIT} pinch hits per week.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Non-dinner chores (Today tab) ─────────────────────────────────────────────
+function NonDinnerChores({state,me,day,upd,toast$}) {
+  const nonDinner = CHORES.filter(c=>!DINNER_BLOCK_IDS.includes(c.id));
+  const sections  = [...new Set(nonDinner.map(c=>c.section))];
+  return (
+    <>
+      {sections.map(secName=>{
+        const list=nonDinner.filter(c=>c.section===secName&&(c.days==='all'||c.days.includes(day)));
+        // For shared chores, only include if someone is assigned today
+        const visibleList = list.filter(c=> c.type==='personal'||c.type==='group'||c.type==='everyone'||state.choreAssignments?.[c.id]?.[day]);
+        if(!visibleList.length) return null;
+        const color=list[0].color;
+        const right = secName==='Weekly Chores'?'1-2x per week':null;
+        return(
+          <div key={secName} style={{borderRadius:14,overflow:'hidden',border:`1px solid ${N.line}`,marginBottom:10,background:'white'}}>
+            <SecHead color={color} right={right}>{secName}</SecHead>
+            {visibleList.map((chore,ci)=>{
+              const owner=state.choreAssignments?.[chore.id]?.[day];
+              const ownerP=state.people.find(p=>p.id===owner);
+              const myKey=`${chore.id}-${day}-${me.id}`;
+              const iDoneIt=!!state.completions[myKey];
+              const isMe=owner===me.id;
+              const borderB = ci<visibleList.length-1?'1px solid #F0F2F6':'none';
+
+              // Personal chore — everyone does their own, show all people
+              if(chore.type==='personal') return(
+                <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                  <div style={{fontSize:14.5,fontWeight:700,marginBottom:2}}>{chore.name}</div>
+                  <div style={{fontSize:12,color:N.inkS,lineHeight:1.4,marginBottom:8}}>{chore.rule}</div>
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                    {state.people.map(p=>{
+                      const key=`${chore.id}-${day}-${p.id}`;
+                      const on=!!state.completions[key];
+                      const isMeP=p.id===me.id;
+                      return(
+                        <div key={p.id} onClick={()=>{if(!isMeP)return;upd(s=>({...s,completions:{...s.completions,[key]:!s.completions[key]}}));toast$(on?'Unchecked':'Done!');}}
+                          style={{display:'flex',alignItems:'center',gap:6,padding:'6px 11px',borderRadius:20,border:`1.5px solid ${on?p.color:N.line}`,background:on?p.color:'white',color:on?'white':N.ink,fontSize:12.5,fontWeight:700,cursor:isMeP?'pointer':'default',opacity:isMeP?1:0.55}}>
+                          <Dot color={on?'white':p.color} sz={8}/>{p.name}: {on?'done':'pending'}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+
+              // Group / Everyone chore — show who signed up and per-person completion
+              if(chore.type==='group'||chore.type==='everyone') {
+                const myDoneIt=!!state.completions[myKey];
+                const gh = state.groupHelpers?.[chore.id] || {};
+                // Who signed up for today?
+                const todayHelpers = Object.keys(gh[day]||{}).map(pid=>state.people.find(p=>p.id===pid)).filter(Boolean);
+                // What days did I sign up for?
+                const mySignedDays = DAYS.filter(d=>gh[d]?.[me.id]);
+                const iSignedToday = !!gh[day]?.[me.id];
+                return(
+                  <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                    <div style={{fontSize:14.5,fontWeight:700,marginBottom:2}}>{chore.name}</div>
+                    <div style={{fontSize:12,color:N.inkS,lineHeight:1.4,marginBottom:8}}>{chore.rule}</div>
+
+                    {/* Who's signed up this week */}
+                    {DAYS.some(d=>Object.keys(gh[d]||{}).length>0) && (
+                      <div style={{marginBottom:10}}>
+                        <div style={{fontSize:11,fontWeight:700,color:N.inkF,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6}}>Signed up this week:</div>
+                        <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                          {state.people.map(p=>{
+                            const pDays = DAYS.filter(d=>gh[d]?.[p.id]);
+                            if(!pDays.length) return null;
+                            return(
+                              <div key={p.id} style={{display:'flex',alignItems:'center',gap:6,fontSize:12.5}}>
+                                <Dot color={p.color} sz={8}/>
+                                <span style={{fontWeight:700,color:p.color}}>{p.name}:</span>
+                                <span style={{color:N.inkS}}>{pDays.join(', ')}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Today's helpers + done button */}
+                    <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                      {iSignedToday && (
+                        <button onClick={()=>{upd(s=>({...s,completions:{...s.completions,[myKey]:!s.completions[myKey]}}));toast$(myDoneIt?'Unchecked':'Done!');}}
+                          style={{padding:'6px 12px',borderRadius:9,border:`1.5px solid ${myDoneIt?N.good:N.line}`,background:myDoneIt?N.good:'white',color:myDoneIt?'white':N.inkS,fontSize:12.5,fontWeight:700,cursor:'pointer'}}>
+                          {myDoneIt?'✓ Done today':'Mark done today'}
+                        </button>
+                      )}
+                      {!iSignedToday && mySignedDays.length>0 && (
+                        <div style={{fontSize:12,color:N.inkF}}>Your days: <b style={{color:N.inkS}}>{mySignedDays.join(', ')}</b></div>
+                      )}
+                      {!iSignedToday && mySignedDays.length===0 && (
+                        <div style={{fontSize:12,color:N.inkF,fontStyle:'italic'}}>You didn't sign up for this chore</div>
+                      )}
+                      {todayHelpers.filter(p=>p.id!==me.id&&state.completions?.[`${chore.id}-${day}-${p.id}`]).map(p=>(
+                        <div key={p.id} style={{display:'flex',alignItems:'center',gap:5,fontSize:12,color:N.good,fontWeight:600}}>
+                          <Dot color={N.good} sz={7}/>{p.name}: done
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              // Shared chore — only show the assigned person
+              return(
+                <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                  <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:14.5,fontWeight:700,marginBottom:2,textDecoration:iDoneIt?'line-through':'none',color:iDoneIt?N.inkF:N.ink}}>{chore.name}</div>
+                      <div style={{fontSize:12,color:N.inkS,lineHeight:1.4}}>{chore.rule}</div>
+                      {ownerP&&<div style={{fontSize:11,color:ownerP.color,fontWeight:600,marginTop:3}}>{ownerP.name}{isMe?' (you)':''}: {iDoneIt?'✓ done':'pending'}</div>}
+                      {isMe&&!iDoneIt&&<PinchBtn state={state} me={me} chore={chore} day={day} upd={upd} toast$={toast$}/>}
+                    </div>
+                    {isMe&&<button onClick={()=>{upd(s=>({...s,completions:{...s.completions,[myKey]:!s.completions[myKey]}}));toast$(iDoneIt?'Unchecked':'Done!');}}
+                      style={{flexShrink:0,padding:'7px 12px',borderRadius:10,border:`1.5px solid ${iDoneIt?N.good:N.line}`,background:iDoneIt?N.good:'white',color:iDoneIt?'white':N.inkS,fontSize:12.5,fontWeight:700,cursor:'pointer',marginTop:2}}>
+                      {iDoneIt?'✓ Done':'Mark done'}
+                    </button>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+
+function Plan({state,me,planWeek,setPlanWeek,upd,toast$,signoffError,setSignoffError}) {
+  const plan = state.weekPlans[planWeek] || freshPlan();
+  const ca   = plan.choreAssignments || {};
+  const myTrades = (plan.tradeRequests||[]).filter(t=>t.to===me.id&&t.status==='pending');
+
+  const updPlan = (fn) => upd(s=>{
+    const plans=[...s.weekPlans];
+    plans[planWeek]=fn(plans[planWeek]||freshPlan());
+    return {...s,weekPlans:plans};
+  });
+
+  const ps = pickStatus(me.id, state);
+
+  const claimDay = (choreId,day) => updPlan(p=>{
+    const m={...(p.choreAssignments?.[choreId]||{})};
+    if(m[day]&&m[day]!==me.id) return p;   // taken — use Override or Trade
+    if(m[day]===me.id) delete m[day]; else m[day]=me.id;
+    return {...p,choreAssignments:{...p.choreAssignments,[choreId]:m}};
+  });
+
+  // Last say: someone who did more chores can take a day off someone who did fewer
+  const overrideDay = (choreId,day,ownerId) => {
+    const chore = CHORES.find(c=>c.id===choreId) || {id:choreId,name:choreId};
+    updPlan(p=>{
+      const m={...(p.choreAssignments?.[choreId]||{})};
+      m[day]=me.id;
+      return {...p,choreAssignments:{...p.choreAssignments,[choreId]:m}};
+    });
+    upd(s=>({...s,notifications:[...(s.notifications||[]),{
+      id:`${Date.now()}-ov`, to:ownerId,
+      text:`${s.people.find(p=>p.id===me.id)?.name} used last say (finished more chores) and took "${chore.name}" on ${DAY_FULL[day]} from you. Pick another day.`,
+      at:new Date().toISOString(), read:false,
+    }]}));
+    toast$('Overridden — they were notified.');
+  };
+
+  // Toggle a day on an "everyone" chore (sweep & mop) — stored in groupHelpers
+  const toggleEveryone = (choreId,day) => updPlan(p=>{
+    const gh={...(p.groupHelpers||{})};
+    gh[choreId]={...(gh[choreId]||{})};
+    gh[choreId][day]={...(gh[choreId][day]||{})};
+    if(gh[choreId][day][me.id]) delete gh[choreId][day][me.id]; else gh[choreId][day][me.id]=true;
+    return {...p,groupHelpers:gh};
+  });
+
+  // Coffee table auto-default: whichever of Jessica/Michael is NOT cooking that night
+  const autoCoffee = () => {
+    updPlan(p=>{
+      const ca2={...(p.choreAssignments||{})};
+      const cookMap = ca2['cook']||{};
+      const coffee = {...(ca2['coffeetable_pre']||{})};
+      DAYS.forEach(d=>{
+        if(!cookMap[d]) return;                       // no cook set that night
+        const notCooking = COFFEE_ELIGIBLE.filter(pid=>pid!==cookMap[d]);
+        if(notCooking.length) coffee[d]=notCooking[0];
+      });
+      ca2['coffeetable_pre']=coffee;
+      return {...p,choreAssignments:ca2};
+    });
+    toast$('Coffee table auto-set to whoever isn\'t cooking.');
+  };
+
+  const requestTrade = (choreId,day,toId) => {
+    if((plan.tradeRequests||[]).find(t=>t.choreId===choreId&&t.day===day&&t.from===me.id&&t.status==='pending')){toast$('Already requested!');return;}
+    updPlan(p=>({...p,tradeRequests:[...(p.tradeRequests||[]),{id:Date.now().toString(),from:me.id,to:toId,choreId,day,status:'pending',at:new Date().toISOString()}]}));
+    toast$('Trade request sent!');
+  };
+
+  const respondTrade = (id,accept) => updPlan(p=>{
+    const trade=(p.tradeRequests||[]).find(t=>t.id===id); if(!trade) return p;
+    let ca2={...p.choreAssignments};
+    if(accept){const m={...(ca2[trade.choreId]||{})};m[trade.day]=trade.from;ca2[trade.choreId]=m;}
+    return {...p,choreAssignments:ca2,tradeRequests:(p.tradeRequests||[]).map(t=>t.id===id?{...t,status:accept?'accepted':'declined'}:t)};
+  });
+
+  const alreadySigned = !!(plan.signOffs?.[me.id]);
+  const handleSignTap = () => {
+    if(alreadySigned){updPlan(p=>({...p,signOffs:{...p.signOffs,[me.id]:false}}));setSignoffError(null);return;}
+    const check=checkSignoff(me.id,plan,state.projects);
+    if(!check.valid){setSignoffError(check.missing);return;}
+    setSignoffError(null);
+    // Last-place picker who never volunteered for a project gets auto-assigned one
+    const isLast = ps.order.length>1 && ps.order[ps.order.length-1]?.id===me.id;
+    const volunteered = (state.projects||[]).some(p=>p.status==='open'&&(p.helpers||[]).includes(me.id));
+    if(isLast && !volunteered){
+      const proj = randomProjectFor(me.id, state.projects);
+      if(proj){
+        upd(s=>({...s,
+          projects:(s.projects||[]).map(p=>p.id===proj.id?{...p,helpers:[...(p.helpers||[]),me.id],autoAssigned:[...(p.autoAssigned||[]),me.id]}:p),
+          notifications:[...(s.notifications||[]),{id:`${Date.now()}-auto`,to:me.id,text:`You finished last on chore completion and didn't volunteer — you've been auto-assigned to project "${proj.title}".`,at:new Date().toISOString(),read:false}],
+        }));
+        toast$(`Auto-assigned to project: ${proj.title}`);
+      }
+    }
+    updPlan(p=>({...p,signOffs:{...p.signOffs,[me.id]:true}}));
+  };
+
+  const startWeek = () => {
+    upd(s=>{
+      const entry={weekOf:s.weekOf,archivedAt:new Date().toISOString(),choreAssignments:s.choreAssignments,completions:s.completions,personalDone:s.personalDone,people:s.people};
+      const newPlan=s.weekPlans[0]||freshPlan();
+      const plans=[...s.weekPlans];plans.shift();plans.push(freshPlan());
+      return{...s,weekOf:newPlan.weekOf||s.weekOf,choreAssignments:newPlan.choreAssignments||{},groupHelpers:newPlan.groupHelpers||{},personalChoreAssignments:newPlan.personalChoreAssignments||{},completions:{},personalDone:{},notes:newPlan.notes||'',history:[...(s.history||[]),entry],weekPlans:plans,pinchCounts:{},pinchRequests:[],notifications:[]};
+    });
+    setPlanWeek(0); toast$('New week started!');
+  };
+
+  const allSigned = state.people.every(p=>plan.signOffs?.[p.id]);
+
+  // Live requirement check for current user
+  const myCheck = checkSignoff(me.id, plan, state.projects);
+  const REQ_LABELS = [
+    'Picked one of: Cook dinner, Dishes, or Kitchen clean',
+    'Picked at least 1 Sweep & Mop day (everyone must)',
+    'Picked another chore or offered to help on a Project',
+  ];
+  const myCheckResults = [
+    DINNER_IDS.some(id=>Object.entries(ca[id]||{}).filter(([,pid])=>pid===me.id).length>0),
+    DAYS.some(d=>plan.groupHelpers?.['sweepmop']?.[d]?.[me.id]),
+    CHORES.filter(c=>!SKIP_IDS.includes(c.id)).some(c=>Object.entries(ca[c.id]||{}).filter(([,pid])=>pid===me.id).length>0)||(state.projects||[]).some(p=>p.status==='open'&&(p.helpers||[]).includes(me.id)),
+  ];
+
+  return (
+    <div>
+      {/* Week selector */}
+      <div style={{padding:'14px 14px 0'}}>
+        <div style={{fontSize:11,fontWeight:700,letterSpacing:'0.07em',textTransform:'uppercase',color:N.inkS,marginBottom:8}}>Planning for</div>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}}>
+          {WEEK_LABELS.map((label,i)=>{
+            const wOf=state.weekPlans[i]?.weekOf;
+            return (
+              <button key={i} onClick={()=>{setPlanWeek(i);setSignoffError(null);}}
+                style={{padding:'7px 12px',borderRadius:10,fontSize:12,fontWeight:700,cursor:'pointer',background:planWeek===i?N.navy:'white',color:planWeek===i?'white':N.inkS,border:`1.5px solid ${planWeek===i?N.navy:N.line}`,textAlign:'left'}}>
+                <div>{label}</div>
+                {wOf&&<div style={{fontSize:10,opacity:0.7,fontWeight:400}}>{wOf}</div>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:11,color:N.inkF}}>Week of:</span>
+          <input key={`${planWeek}-${plan.weekOf}`} defaultValue={plan.weekOf} onBlur={e=>updPlan(p=>({...p,weekOf:e.target.value}))} placeholder="e.g. Jul 7"
+            style={{flex:1,border:`1.5px solid ${N.line}`,borderRadius:8,padding:'7px 10px',fontSize:13,outline:'none',color:N.ink}}/>
+        </div>
+      </div>
+
+      {/* Pick Order Leaderboard */}
+      <div style={{margin:'14px 14px 0',background:'white',borderRadius:14,border:`1px solid ${N.line}`,overflow:'hidden'}}>
+        <div style={{padding:'9px 14px',background:'linear-gradient(135deg,#B8860B,#D4A017)',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <span style={{color:'white',fontWeight:800,fontSize:12,letterSpacing:'0.04em'}}>🏆 PICK ORDER</span>
+          <span style={{fontSize:10,color:'rgba(255,255,255,0.85)',fontWeight:600}}>Higher % = last say</span>
+        </div>
+        <div style={{padding:'10px 14px'}}>
+          {ps.order.map((p,i)=>{
+            const isLast = i===ps.order.length-1 && ps.order.length>1;
+            const isMe = p.id===me.id;
+            return (
+              <div key={p.id} style={{display:'flex',alignItems:'center',gap:9,padding:'7px 0',borderBottom:i<ps.order.length-1?'1px solid #F4F6F8':'none'}}>
+                <span style={{fontSize:13,fontWeight:800,color:isLast?'#C0392B':N.inkS,minWidth:20}}>{i+1}.</span>
+                <Dot color={p.color} sz={9}/>
+                <span style={{fontSize:13.5,fontWeight:700,color:p.color,flex:1}}>{p.name}{isMe?' (you)':''}</span>
+                <span style={{fontSize:12.5,fontWeight:800,color:isLast?'#C0392B':N.good}}>{p.pct}%</span>
+                {i===0 && <span style={{fontSize:9,background:'rgba(30,132,73,0.12)',color:N.good,padding:'2px 7px',borderRadius:10,fontWeight:700}}>Last say</span>}
+                {isLast && <span style={{fontSize:9,background:'rgba(192,57,43,0.1)',color:'#C0392B',padding:'2px 7px',borderRadius:10,fontWeight:700}}>Can be overridden</span>}
+              </div>
+            );
+          })}
+          <div style={{fontSize:11,color:N.inkF,lineHeight:1.45,marginTop:8,paddingTop:8,borderTop:`1px solid ${N.line}`}}>
+            Anyone can pick any chore, any time. But whoever finished <b>more</b> chores gets <b>last say</b> — they can override a day claimed by someone below them. Finish last and don't volunteer for a project, and one gets assigned to you.
+          </div>
+        </div>
+      </div>
+
+      {/* Sign-off requirement checklist */}
+      {planWeek===0 && (
+        <div style={{margin:'12px 14px 0',background:'rgba(46,127,184,0.07)',border:'1px solid rgba(46,127,184,0.2)',borderRadius:12,padding:'10px 14px'}}>
+          <div style={{fontSize:11.5,fontWeight:800,color:N.blue,marginBottom:8}}>YOUR SIGN-OFF CHECKLIST</div>
+          {REQ_LABELS.map((req,i)=>(
+            <div key={i} style={{display:'flex',gap:8,alignItems:'flex-start',marginBottom:5}}>
+              <span style={{flexShrink:0,width:18,height:18,borderRadius:5,background:myCheckResults[i]?N.good:'white',border:`2px solid ${myCheckResults[i]?N.good:N.line}`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                {myCheckResults[i]&&<svg width={11} height={11} viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+              </span>
+              <span style={{fontSize:12,color:myCheckResults[i]?N.good:N.inkS,lineHeight:1.4}}>{req}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Trade requests */}
+      {myTrades.length>0 && (
+        <div style={{margin:'12px 14px 0',background:'#FBF3E0',border:'1px solid #E8D29A',borderRadius:14,padding:14}}>
+          <div style={{fontSize:12.5,fontWeight:800,color:'#6B4F0F',marginBottom:10}}>Trade Requests for You</div>
+          {myTrades.map(trade=>{
+            const fromP=state.people.find(p=>p.id===trade.from);const chore=CHORES.find(c=>c.id===trade.choreId);
+            return (
+              <div key={trade.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8,gap:8}}>
+                <span style={{fontSize:13,color:'#6B4F0F',flex:1}}><b>{fromP?.name}</b> wants <b>{chore?.name}</b> on <b>{trade.day}</b></span>
+                <div style={{display:'flex',gap:6,flexShrink:0}}>
+                  <button onClick={()=>respondTrade(trade.id,true)} style={{background:N.good,color:'white',border:'none',borderRadius:8,padding:'5px 10px',fontSize:12,fontWeight:700,cursor:'pointer'}}>Accept</button>
+                  <button onClick={()=>respondTrade(trade.id,false)} style={{background:'#EEF1F5',color:N.inkS,border:'none',borderRadius:8,padding:'5px 10px',fontSize:12,fontWeight:700,cursor:'pointer'}}>Decline</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <Sec title="Assign Chores">
+        <Card style={{fontSize:12.5,color:N.inkS,lineHeight:1.45}}>Tap a day chip to claim that chore for that day. Chips taken by others show a <b>Trade?</b> button.</Card>
+      </Sec>
+
+      {/* Dinner Block in Plan */}
+      <div style={{padding:'0 14px 10px'}}>
+        <div style={{borderRadius:14,overflow:'hidden',border:'1.5px solid #8E44AD33',background:'white'}}>
+          <div style={{padding:'8px 14px',background:'linear-gradient(135deg,#6C3483,#8E44AD)',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <span style={{color:'white',fontWeight:800,fontSize:12,letterSpacing:'0.04em'}}>🍽️ DINNER BLOCK  <span style={{fontWeight:400,opacity:0.75,fontSize:11}}>— plan these together</span></span>
+            <span style={{fontSize:10,color:'rgba(255,255,255,0.7)',fontWeight:600}}>Pick one of these (required)</span>
+          </div>
+          {DINNER_BLOCK_META.map((meta,mi)=>{
+            const choreMap=ca[meta.id]||{};
+            const isReq=meta.isCook;
+            return(
+              <div key={meta.id} style={{padding:'11px 14px',borderBottom:mi<DINNER_BLOCK_META.length-1?'1px solid #F4EBF8':'none',background:mi%2===0?'white':'#FEFAFF'}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+                  <div style={{fontSize:13.5,fontWeight:700}}>{meta.label}</div>
+                  {isReq&&<span style={{fontSize:9,background:'rgba(108,52,131,0.12)',color:'#6C3483',padding:'2px 6px',borderRadius:10,fontWeight:700}}>Cook picks first</span>}
+                </div>
+                <div style={{fontSize:11,color:N.inkS,marginBottom:8,lineHeight:1.3}}>{meta.sub}</div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+                  {DAYS.map(d=>{
+                    const owner=choreMap[d];
+                    const ownerP=state.people.find(p=>p.id===owner);
+                    const isMinePick=owner===me.id;
+                    const pendReq=(plan.tradeRequests||[]).find(t=>t.choreId===meta.id&&t.day===d&&t.from===me.id&&t.status==='pending');
+                    if(!owner) return<button key={d} onClick={()=>claimDay(meta.id,d)} style={{padding:'5px 9px',borderRadius:7,fontSize:11.5,fontWeight:700,background:'white',color:N.inkS,border:`1.5px solid ${N.line}`,cursor:'pointer',minWidth:40,textAlign:'center'}}>{d}</button>;
+                    if(isMinePick) return<button key={d} onClick={()=>claimDay(meta.id,d)} style={{padding:'5px 9px',borderRadius:7,fontSize:11.5,fontWeight:700,background:ownerP?.color||'#8E44AD',color:'white',cursor:'pointer',border:'none',minWidth:40}}>{d} ✓</button>;
+                    return(
+                      <div key={d} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:2}}>
+                        <div style={{padding:'5px 9px',borderRadius:7,fontSize:11.5,fontWeight:700,background:ownerP?.color||'#888',color:'white',minWidth:40,textAlign:'center',opacity:0.85}}>{d}</div>
+                        <div style={{fontSize:8.5,color:N.inkF}}>{ownerP?.name}</div>
+                        {!pendReq?<button onClick={()=>requestTrade(meta.id,d,owner)} style={{fontSize:8.5,padding:'2px 5px',borderRadius:4,border:`1px solid ${'#8E44AD'}`,background:'white',color:'#8E44AD',cursor:'pointer',fontWeight:700}}>Trade?</button>:<div style={{fontSize:8.5,color:N.inkF}}>Sent...</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Non-dinner chores — Sweep + Weekly + Yard */}
+      {[...new Set(CHORES.filter(c=>!DINNER_BLOCK_IDS.includes(c.id)).map(c=>c.section))].map(secName=>{
+        const list=CHORES.filter(c=>!DINNER_BLOCK_IDS.includes(c.id)&&c.section===secName);
+        const color=list[0].color;
+        const subtitle = secName==='Weekly Chores'?'Pick any day — 1-2x per week' : secName==='Yard / Extra'?'Volunteer to help':null;
+        return (
+          <div key={secName} style={{padding:'0 14px 10px'}}>
+            <div style={{borderRadius:14,overflow:'hidden',border:`1px solid ${N.line}`,background:'white'}}>
+              <SecHead color={color} right={subtitle}>{secName}</SecHead>
+              {list.map((chore,ci)=>{
+                const isLast = ci===list.length-1;
+                const borderB = isLast?'none':'1px solid #F0F2F6';
+
+                // ── PERSONAL chore: each person picks their own day ──────────
+                if(chore.type==='personal') {
+                  return (
+                    <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                        <div style={{fontSize:14,fontWeight:700}}>{chore.name}</div>
+                        <span style={{fontSize:9,background:'rgba(30,132,73,0.12)',color:'#1E8449',padding:'2px 7px',borderRadius:10,fontWeight:700}}>Everyone does their own</span>
+                      </div>
+                      <div style={{fontSize:11.5,color:N.inkS,marginBottom:10,lineHeight:1.3}}>{chore.rule}</div>
+                      {state.people.map(p=>{
+                        const pickedDay = plan.personalChoreAssignments?.[p.id]?.[chore.id];
+                        const isMe = p.id===me.id;
+                        return (
+                          <div key={p.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                            <div style={{display:'flex',alignItems:'center',gap:5,minWidth:72}}>
+                              <Dot color={p.color} sz={8}/><span style={{fontSize:12,fontWeight:700,color:p.color}}>{p.name}</span>
+                            </div>
+                            <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                              {DAYS.map(d=>{
+                                const isPicked = pickedDay===d;
+                                if(!isMe) return <div key={d} style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,background:isPicked?p.color:'#F0F2F6',color:isPicked?'white':N.inkF,minWidth:34,textAlign:'center'}}>{d}{isPicked?' ✓':''}</div>;
+                                return <button key={d} onClick={()=>updPlan(pl=>{
+                                  const pca={...pl.personalChoreAssignments||{}};
+                                  pca[me.id]={...pca[me.id]||{},[chore.id]:isPicked?null:d};
+                                  return {...pl,personalChoreAssignments:pca};
+                                })} style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer',background:isPicked?p.color:'white',color:isPicked?'white':N.inkS,border:`1.5px solid ${isPicked?p.color:N.line}`,minWidth:34,textAlign:'center'}}>{d}{isPicked?' ✓':''}</button>;
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                }
+
+                // ── GROUP chore: anyone can volunteer ────────────────────────
+                if(chore.type==='group') {
+                  const gh = plan.groupHelpers?.[chore.id]||{};
+                  const myDays = DAYS.filter(d=>gh[d]?.[me.id]);
+                  return (
+                    <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                        <div style={{fontSize:14,fontWeight:700}}>{chore.name}</div>
+                        <span style={{fontSize:9,background:'rgba(184,134,11,0.12)',color:'#B8860B',padding:'2px 7px',borderRadius:10,fontWeight:700}}>Group — help out!</span>
+                      </div>
+                      <div style={{fontSize:11.5,color:N.inkS,marginBottom:10,lineHeight:1.3}}>{chore.rule}</div>
+                      <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:8}}>
+                        {DAYS.map(d=>{
+                          const helpers=Object.keys(gh[d]||{}).map(pid=>state.people.find(p=>p.id===pid)).filter(Boolean);
+                          const iHelp=!!(gh[d]?.[me.id]);
+                          return (
+                            <div key={d} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3}}>
+                              <button onClick={()=>updPlan(pl=>{
+                                const newGH={...pl.groupHelpers||{}};
+                                newGH[chore.id]={...newGH[chore.id]||{}};
+                                newGH[chore.id][d]={...newGH[chore.id][d]||{}};
+                                if(iHelp) delete newGH[chore.id][d][me.id]; else newGH[chore.id][d][me.id]=true;
+                                return {...pl,groupHelpers:newGH};
+                              })} style={{padding:'5px 9px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',background:iHelp?'#B8860B':'white',color:iHelp?'white':N.inkS,border:`1.5px solid ${iHelp?'#B8860B':N.line}`,minWidth:40,textAlign:'center'}}>
+                                {d}{iHelp?' ✓':''}
+                              </button>
+                              {helpers.length>0&&<div style={{display:'flex',gap:2}}>
+                                {helpers.map(h=><Dot key={h.id} color={h.color} sz={7}/>)}
+                              </div>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {myDays.length>0&&<div style={{fontSize:11.5,color:'#B8860B',fontWeight:600}}>You're helping on: {myDays.join(', ')}</div>}
+                    </div>
+                  );
+                }
+
+                // ── EVERYONE chore (Sweep & Mop): each person picks their own days ──
+                if(chore.type==='everyone') {
+                  const gh = plan.groupHelpers?.[chore.id]||{};
+                  const myDays = DAYS.filter(d=>gh[d]?.[me.id]);
+                  return (
+                    <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2,flexWrap:'wrap'}}>
+                        <div style={{fontSize:14,fontWeight:700}}>{chore.name}</div>
+                        <span style={{fontSize:10,background:'rgba(231,76,60,0.12)',color:'#C0392B',padding:'2px 7px',borderRadius:20,fontWeight:700}}>Required</span>
+                        <span style={{fontSize:9,background:'rgba(46,127,184,0.12)',color:N.blue,padding:'2px 7px',borderRadius:10,fontWeight:700}}>Everyone picks a day</span>
+                      </div>
+                      <div style={{fontSize:11.5,color:N.inkS,marginBottom:10,lineHeight:1.3}}>{chore.rule}</div>
+                      {state.people.map(p=>{
+                        const pDays = DAYS.filter(d=>gh[d]?.[p.id]);
+                        const isMe = p.id===me.id;
+                        return (
+                          <div key={p.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+                            <div style={{display:'flex',alignItems:'center',gap:5,minWidth:72}}>
+                              <Dot color={p.color} sz={8}/><span style={{fontSize:12,fontWeight:700,color:p.color}}>{p.name}</span>
+                            </div>
+                            <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                              {DAYS.map(d=>{
+                                const on = !!gh[d]?.[p.id];
+                                if(!isMe) return <div key={d} style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,background:on?p.color:'#F0F2F6',color:on?'white':N.inkF,minWidth:34,textAlign:'center'}}>{d}{on?' ✓':''}</div>;
+                                return <button key={d} onClick={()=>toggleEveryone(chore.id,d)} style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer',background:on?p.color:'white',color:on?'white':N.inkS,border:`1.5px solid ${on?p.color:N.line}`,minWidth:34,textAlign:'center'}}>{d}{on?' ✓':''}</button>;
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {myDays.length===0 && <div style={{fontSize:11.5,color:'#C0392B',fontWeight:700,marginTop:2}}>⚠️ You still need to pick at least 1 day.</div>}
+                    </div>
+                  );
+                }
+
+                // ── SHARED chore: first-come, but higher-ranked can override ─────
+                const choreMap=ca[chore.id]||{};
+                const restricted = chore.only;                       // e.g. coffee table
+                const iAmEligible = !restricted || restricted.includes(me.id);
+                const isCoffee = chore.id==='coffeetable_pre';
+                return (
+                  <div key={chore.id} style={{padding:'12px 14px',borderBottom:borderB}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2,flexWrap:'wrap'}}>
+                      <div style={{fontSize:14,fontWeight:700}}>{chore.name}</div>
+                      {restricted&&<span style={{fontSize:9,background:'rgba(125,60,152,0.12)',color:'#7D3C98',padding:'2px 7px',borderRadius:10,fontWeight:700}}>
+                        {restricted.map(id=>state.people.find(p=>p.id===id)?.name||id).join(' & ')} only
+                      </span>}
+                    </div>
+                    <div style={{fontSize:11.5,color:N.inkS,marginBottom:8,lineHeight:1.3}}>{chore.rule}</div>
+                    {isCoffee && (
+                      <button onClick={autoCoffee} style={{marginBottom:10,padding:'5px 11px',borderRadius:8,fontSize:11.5,fontWeight:700,cursor:'pointer',background:'white',color:N.blue,border:`1.5px solid ${N.blue}`}}>
+                        ⚡ Auto-fill: whoever isn't cooking
+                      </button>
+                    )}
+                    {!iAmEligible && <div style={{fontSize:11.5,color:N.inkF,fontStyle:'italic',marginBottom:8}}>Not your chore — view only.</div>}
+                    <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                      {DAYS.map(d=>{
+                        const owner=choreMap[d];
+                        const ownerP=state.people.find(p=>p.id===owner);
+                        const isMinePick=owner===me.id;
+                        const pendReq=(plan.tradeRequests||[]).find(t=>t.choreId===chore.id&&t.day===d&&t.from===me.id&&t.status==='pending');
+                        if(!owner) return <button key={d} onClick={()=>iAmEligible&&claimDay(chore.id,d)} disabled={!iAmEligible}
+                          style={{padding:'6px 10px',borderRadius:8,fontSize:12,fontWeight:700,background:'white',color:iAmEligible?N.inkS:'#C7CDD4',border:`1.5px solid ${N.line}`,cursor:iAmEligible?'pointer':'not-allowed',minWidth:42,textAlign:'center'}}>{d}</button>;
+                        if(isMinePick) return <button key={d} onClick={()=>claimDay(chore.id,d)}
+                          style={{padding:'6px 10px',borderRadius:8,fontSize:12,fontWeight:700,background:ownerP?.color||N.blue,color:'white',cursor:'pointer',border:'none',minWidth:42}}>{d} ✓</button>;
+                        const canTake = iAmEligible && ps.canOverride(owner);
+                        return(
+                          <div key={d} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:2}}>
+                            <div style={{padding:'6px 10px',borderRadius:8,fontSize:12,fontWeight:700,background:ownerP?.color||'#888',color:'white',minWidth:42,textAlign:'center',opacity:0.85}}>{d}</div>
+                            <div style={{fontSize:9,color:N.inkF}}>{ownerP?.name}</div>
+                            {canTake && <button onClick={()=>overrideDay(chore.id,d,owner)} style={{fontSize:9,padding:'2px 6px',borderRadius:5,border:'1px solid #C0392B',background:'#FDEDEC',color:'#C0392B',cursor:'pointer',fontWeight:700}}>Override</button>}
+                            {iAmEligible && (!pendReq
+                              ? <button onClick={()=>requestTrade(chore.id,d,owner)} style={{fontSize:9,padding:'2px 6px',borderRadius:5,border:`1px solid ${N.blue}`,background:'white',color:N.blue,cursor:'pointer',fontWeight:700}}>Trade?</button>
+                              : <div style={{fontSize:9,color:N.inkF}}>Sent...</div>)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Sign-off (Next Week only) */}
+      {planWeek===0 && (
+        <div style={{background:`linear-gradient(135deg,${N.navy},${N.navyL})`,color:'white',borderRadius:14,padding:16,margin:'0 14px 14px'}}>
+          <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>Everyone Sign Off</div>
+          <div style={{fontSize:12.5,color:'#B9CCE0',marginBottom:14,lineHeight:1.4}}>Complete the checklist above first, then tap your name to sign. Once all signed, tap <b>Start This Week</b>.</div>
+          {signoffError && (
+            <div style={{background:'rgba(231,76,60,0.18)',border:'1px solid rgba(231,76,60,0.4)',borderRadius:10,padding:'10px 14px',marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:800,color:'#F1948A',marginBottom:6}}>Still needed:</div>
+              {signoffError.map((e,i)=><div key={i} style={{fontSize:12,color:'#F1948A',marginBottom:3}}>• {e}</div>)}
+            </div>
+          )}
+          <div style={{display:'flex',flexDirection:'column',gap:8,marginBottom:14}}>
+            {state.people.map(p=>{
+              const signed=!!(plan.signOffs?.[p.id]);
+              const isMe=p.id===me.id;
+              const pCheck=checkSignoff(p.id,plan,state.projects);
+              return (
+                <div key={p.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'11px 14px',background:signed?'rgba(46,204,113,0.18)':'rgba(255,255,255,0.08)',borderRadius:11,border:`1.5px solid ${signed?'rgba(46,204,113,0.5)':'rgba(255,255,255,0.15)'}`}}>
+                  <div>
+                    <div style={{display:'flex',alignItems:'center',gap:9,fontWeight:700,fontSize:14}}><Dot color={p.color} sz={9}/>{p.name}</div>
+                    {!signed&&!isMe&&!pCheck.valid&&<div style={{fontSize:10,color:'rgba(255,255,255,0.35)',marginTop:2,marginLeft:18}}>{pCheck.missing.length} requirement{pCheck.missing.length!==1?'s':''} left</div>}
+                  </div>
+                  {isMe
+                    ?<button onClick={handleSignTap} style={{fontSize:12,fontWeight:800,padding:'7px 14px',borderRadius:20,border:'none',cursor:'pointer',background:signed?'rgba(46,204,113,0.25)':'#7FC4F0',color:signed?'#6FE3A0':N.navy}}>{signed?'✓ Signed':'Tap to sign'}</button>
+                    :<span style={{fontSize:12,fontWeight:800,padding:'7px 14px',borderRadius:20,background:'rgba(255,255,255,0.12)',color:'rgba(255,255,255,0.4)'}}>{signed?'✓ Signed':'Waiting...'}</span>
+                  }
+                </div>
+              );
+            })}
+          </div>
+          <button onClick={allSigned?startWeek:undefined}
+            style={{width:'100%',padding:13,borderRadius:11,border:'none',fontSize:14.5,fontWeight:800,cursor:allSigned?'pointer':'default',background:allSigned?'#4ADE80':'rgba(255,255,255,0.1)',color:allSigned?'#06371C':'rgba(255,255,255,0.4)'}}>
+            {allSigned?'🚀 Start This Week':`Waiting on ${state.people.filter(p=>!(plan.signOffs?.[p.id])).map(p=>p.name).join(', ')}`}
+          </button>
+        </div>
+      )}
+      {planWeek>0 && <div style={{margin:'0 14px 14px',background:'rgba(46,127,184,0.08)',borderRadius:12,padding:'12px 14px',fontSize:12.5,color:N.inkS,lineHeight:1.5}}>Sign-off and Start This Week only appear for Next Week.</div>}
+
+      {/* Laundry Schedule */}
+      <Sec title="Laundry Schedule">
+        <Card>
+          <div style={{fontSize:12,color:N.inkS,lineHeight:1.45,marginBottom:12}}>
+            One person per day so nobody's fighting over the washer. Tap a day to claim it — days already taken by someone else are locked.
+          </div>
+          {state.people.map(p=>{
+            const myDay = laundryDayFor(p.id, state);
+            const isMe  = p.id===me.id;
+            return (
+              <div key={p.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:9}}>
+                <div style={{display:'flex',alignItems:'center',gap:5,minWidth:72}}>
+                  <Dot color={p.color} sz={8}/><span style={{fontSize:12,fontWeight:700,color:p.color}}>{p.name}</span>
+                </div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                  {DAYS.map(d=>{
+                    const mine = myDay===d;
+                    const takenBy = state.people.find(o=>o.id!==p.id && laundryDayFor(o.id,state)===d);
+                    const locked = !!takenBy;
+                    if(!isMe) return <div key={d} style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,background:mine?p.color:'#F0F2F6',color:mine?'white':N.inkF,minWidth:34,textAlign:'center'}}>{d}{mine?' ✓':''}</div>;
+                    return <button key={d} disabled={locked} onClick={()=>upd(st=>({...st,laundrySchedule:{...(st.laundrySchedule||DEFAULT_LAUNDRY),[me.id]:d}}))}
+                      title={locked?`${takenBy.name}'s laundry day`:''}
+                      style={{padding:'4px 7px',borderRadius:6,fontSize:11,fontWeight:700,cursor:locked?'not-allowed':'pointer',background:mine?p.color:(locked?'#F0F2F6':'white'),color:mine?'white':(locked?'#C7CDD4':N.inkS),border:`1.5px solid ${mine?p.color:N.line}`,minWidth:34,textAlign:'center'}}>{d}{mine?' ✓':(locked?' ✕':'')}</button>;
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </Card>
+      </Sec>
+
+      <Sec title="Notes">
+        <Card>
+          <textarea key={`${planWeek}-notes`} defaultValue={plan.notes} onBlur={e=>updPlan(p=>({...p,notes:e.target.value}))} placeholder="e.g. Jessica traveling Thu-Fri..."
+            style={{width:'100%',minHeight:64,border:`1.5px solid ${N.line}`,borderRadius:9,padding:10,fontSize:13.5,outline:'none',fontFamily:'inherit',resize:'vertical',color:N.ink}}/>
+        </Card>
+      </Sec>
+    </div>
+  );
+}
+
+// ── Projects Tab ──────────────────────────────────────────────────────────────
+function Projects({state,me,upd,toast$}) {
+  const [showForm,setShowForm] = useState(false);
+  const [title,setTitle]       = useState('');
+  const [summary,setSummary]   = useState('');
+  const [startDate,setStartDate] = useState('');
+  const [endDate,setEndDate]   = useState('');
+  const [filter,setFilter]     = useState('open');
+
+  const submit = () => {
+    const t=title.trim(); if(!t){toast$('Please add a project title');return;}
+    const project={id:Date.now().toString(),title:t,summary:summary.trim(),startDate,endDate,submittedBy:me.id,submittedAt:new Date().toISOString(),helpers:[],status:'open'};
+    upd(s=>({...s,projects:[...(s.projects||[]),project]}));
+    setTitle('');setSummary('');setStartDate('');setEndDate('');setShowForm(false);toast$('Project added!');
+  };
+
+  const toggleHelper = (projectId) => upd(s=>({...s,projects:(s.projects||[]).map(p=>{
+    if(p.id!==projectId)return p;
+    const h=p.helpers||[];
+    return {...p,helpers:h.includes(me.id)?h.filter(x=>x!==me.id):[...h,me.id]};
+  })}));
+
+  const markDone = (projectId) => {
+    upd(s=>({...s,projects:(s.projects||[]).map(p=>p.id===projectId?{...p,status:p.status==='done'?'open':'done',completedAt:new Date().toISOString()}:p)}));
+    toast$('Status updated!');
+  };
+
+  const fmt = (d) => d ? new Date(d+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : null;
+  const projects = (state.projects||[]).filter(p=>filter==='all'||p.status===filter);
+
+  return (
+    <div style={{padding:'16px 14px'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+        <div style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.08em',textTransform:'uppercase',color:N.inkS}}>Home Projects</div>
+        <button onClick={()=>setShowForm(!showForm)} style={{padding:'7px 14px',borderRadius:20,background:showForm?'#EEF1F5':N.navy,color:showForm?N.inkS:'white',border:'none',fontSize:12.5,fontWeight:700,cursor:'pointer'}}>
+          {showForm?'Cancel':'+ Add Project'}
+        </button>
+      </div>
+
+      <div style={{background:'rgba(46,127,184,0.07)',border:'1px solid rgba(46,127,184,0.2)',borderRadius:10,padding:'10px 14px',marginBottom:12,fontSize:12.5,color:N.inkS,lineHeight:1.45}}>
+        Tap <b>I'll help!</b> to volunteer. Helping with a project counts toward your Plan sign-off.
+      </div>
+
+      {showForm && (
+        <div style={{background:'white',borderRadius:14,padding:16,border:`1px solid ${N.line}`,marginBottom:14,boxShadow:'0 2px 8px rgba(20,30,50,0.08)'}}>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:12,color:N.navy}}>Submit a Home Project</div>
+          <div style={{marginBottom:10}}>
+            <label style={{fontSize:11.5,fontWeight:700,color:N.inkS,display:'block',marginBottom:4}}>PROJECT TITLE *</label>
+            <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Fix back fence"
+              style={{width:'100%',border:`1.5px solid ${N.line}`,borderRadius:9,padding:'9px 12px',fontSize:14,outline:'none',color:N.ink}}/>
+          </div>
+          <div style={{marginBottom:10}}>
+            <label style={{fontSize:11.5,fontWeight:700,color:N.inkS,display:'block',marginBottom:4}}>SUMMARY</label>
+            <textarea value={summary} onChange={e=>setSummary(e.target.value)} placeholder="Describe what needs to be done..."
+              style={{width:'100%',border:`1.5px solid ${N.line}`,borderRadius:9,padding:'9px 12px',fontSize:13.5,outline:'none',fontFamily:'inherit',resize:'vertical',minHeight:60,color:N.ink}}/>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
+            <div>
+              <label style={{fontSize:11.5,fontWeight:700,color:N.inkS,display:'block',marginBottom:4}}>START DATE</label>
+              <input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)}
+                style={{width:'100%',border:`1.5px solid ${N.line}`,borderRadius:9,padding:'9px 10px',fontSize:13,outline:'none',color:N.ink}}/>
+            </div>
+            <div>
+              <label style={{fontSize:11.5,fontWeight:700,color:N.inkS,display:'block',marginBottom:4}}>END / TARGET DATE</label>
+              <input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)}
+                style={{width:'100%',border:`1.5px solid ${N.line}`,borderRadius:9,padding:'9px 10px',fontSize:13,outline:'none',color:N.ink}}/>
+            </div>
+          </div>
+          <button onClick={submit} style={{width:'100%',padding:12,borderRadius:10,border:'none',background:N.navy,color:'white',fontSize:14,fontWeight:700,cursor:'pointer'}}>Submit Project</button>
+        </div>
+      )}
+
+      <div style={{display:'flex',gap:6,marginBottom:14}}>
+        {[{k:'open',l:'Open'},{k:'done',l:'Done'},{k:'all',l:'All'}].map(f=>(
+          <button key={f.k} onClick={()=>setFilter(f.k)}
+            style={{padding:'6px 14px',borderRadius:20,fontSize:12.5,fontWeight:700,cursor:'pointer',border:`1.5px solid ${filter===f.k?N.navy:N.line}`,background:filter===f.k?N.navy:'white',color:filter===f.k?'white':N.inkS}}>
+            {f.l}
+          </button>
+        ))}
+      </div>
+
+      {projects.length===0
+        ? <div style={{textAlign:'center',color:N.inkF,fontSize:13.5,padding:'40px 20px',lineHeight:1.6}}>{filter==='done'?'No completed projects yet.':'No open projects. Tap + Add Project!'}</div>
+        : projects.slice().reverse().map(project=>{
+          const submitter=state.people.find(p=>p.id===project.submittedBy);
+          const amHelper=(project.helpers||[]).includes(me.id);
+          const isDone=project.status==='done';
+          const helpersP=(project.helpers||[]).map(hid=>state.people.find(p=>p.id===hid)).filter(Boolean);
+          const hasDateRange = project.startDate || project.endDate;
+          return (
+            <div key={project.id} style={{background:'white',borderRadius:14,border:`1px solid ${N.line}`,marginBottom:12,overflow:'hidden',opacity:isDone?0.75:1}}>
+              <div style={{padding:'12px 14px',borderBottom:'1px solid #F0F2F6'}}>
+                <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8,marginBottom:6}}>
+                  <div style={{flex:1}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginBottom:4}}>
+                      <div style={{fontSize:15,fontWeight:800,color:isDone?N.inkS:N.ink,textDecoration:isDone?'line-through':'none'}}>{project.title}</div>
+                      {project.recurring&&<span style={{fontSize:9,background:'rgba(46,127,184,0.1)',color:N.blue,padding:'2px 6px',borderRadius:20,fontWeight:700}}>Recurring</span>}
+                    </div>
+                    {project.summary&&<div style={{fontSize:13,color:N.inkS,lineHeight:1.4,marginBottom:6}}>{project.summary}</div>}
+                    {/* Date frame */}
+                    {hasDateRange && (
+                      <div style={{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',background:'#F0F7FF',borderRadius:8,width:'fit-content'}}>
+                        <span style={{fontSize:11,color:N.blue}}>📅</span>
+                        <span style={{fontSize:11.5,fontWeight:700,color:N.blue}}>
+                          {project.startDate&&project.endDate?`${fmt(project.startDate)} → ${fmt(project.endDate)}`:project.startDate?`Starts ${fmt(project.startDate)}`:project.endDate?`Due ${fmt(project.endDate)}`:''}
+                        </span>
+                      </div>
+                    )}
+                    {submitter&&<div style={{fontSize:11.5,color:N.inkF,marginTop:6}}>Submitted by <b style={{color:submitter.color}}>{submitter.name}</b></div>}
+                  </div>
+                  <button onClick={()=>markDone(project.id)}
+                    style={{flexShrink:0,padding:'5px 10px',borderRadius:8,fontSize:11.5,fontWeight:700,border:`1.5px solid ${isDone?N.line:N.good}`,background:isDone?'white':N.good,color:isDone?N.inkS:'white',cursor:'pointer'}}>
+                    {isDone?'Reopen':'Done'}
+                  </button>
+                </div>
+              </div>
+              <div style={{padding:'10px 14px'}}>
+                <div style={{fontSize:11,fontWeight:700,color:N.inkF,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:8}}>{helpersP.length?`${helpersP.length} helping:`:'Who can help?'}</div>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                  {helpersP.map(h=>(
+                    <div key={h.id} style={{display:'flex',alignItems:'center',gap:5,padding:'5px 10px',borderRadius:20,background:`${h.color}18`,border:`1.5px solid ${h.color}`,fontSize:12.5,fontWeight:700,color:h.color}}>
+                      <Dot color={h.color} sz={7}/>{h.name}
+                    </div>
+                  ))}
+                  {!isDone&&(
+                    <button onClick={()=>toggleHelper(project.id)}
+                      style={{padding:'5px 12px',borderRadius:20,fontSize:12.5,fontWeight:700,cursor:'pointer',border:`1.5px solid ${amHelper?'#E74C3C':N.good}`,background:amHelper?'#FDEAEA':'white',color:amHelper?'#C0392B':N.good}}>
+                      {amHelper?"Remove me":"I'll help!"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })
+      }
+    </div>
+  );
+}
+
+// ── History Tab ───────────────────────────────────────────────────────────────
+function History({state,expanded,setExpanded}) {
+  const people=state.people,ca=state.choreAssignments||{},comp=state.completions||{},pd=state.personalDone||{};
+  const choreStats=(pid,ca2,comp2)=>{let a=0,d=0;CHORES.forEach(c=>choreDays(c).forEach(day=>{if((ca2?.[c.id]||{})[day]===pid){a++;if(comp2?.[`${c.id}-${day}-${pid}`])d++;}}));return{assigned:a,done:d,pct:a?Math.round(d/a*100):0};};
+  const personalStats=(pid,pd2)=>{const tasks=PERSONAL_TASKS[pid]||[];let t=0,d=0;DAYS.forEach(day=>tasks.filter(tk=>isTaskActive(tk,day,state,pid)).forEach(tk=>{t++;if(pd2?.[`${pid}-${tk.id}-${day}`])d++;}));return{total:t,done:d,pct:t?Math.round(d/t*100):0};};
+
+  return (
+    <div style={{padding:'16px 14px'}}>
+      <div style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.08em',textTransform:'uppercase',color:N.inkS,marginBottom:8}}>Current Week{state.weekOf?` — ${state.weekOf}`:''}</div>
+      <div style={{background:'white',borderRadius:14,border:`1px solid ${N.line}`,marginBottom:16,overflow:'hidden'}}>
+        {people.map(p=>{const cs=choreStats(p.id,ca,comp);const ps=personalStats(p.id,pd);const tot=cs.assigned+ps.total;const totD=cs.done+ps.done;const pct=tot?Math.round(totD/tot*100):0;return(
+          <div key={p.id} style={{padding:'14px 16px',borderBottom:'1px solid #F0F2F6'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}><div style={{display:'flex',alignItems:'center',gap:8,fontWeight:700,fontSize:14}}><Dot color={p.color} sz={10}/>{p.name}</div><span style={{fontSize:14,fontWeight:800,color:p.color}}>{pct}%</span></div>
+            <ProgressBar pct={pct} color={p.color}/>
+            <div style={{fontSize:11.5,color:N.inkS,marginTop:6,display:'flex',gap:16}}><span>Chores: {cs.done}/{cs.assigned}</span><span>Personal: {ps.done}/{ps.total}</span></div>
+          </div>
+        );})}
+      </div>
+      <div style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.08em',textTransform:'uppercase',color:N.inkS,marginBottom:8}}>This Week — Who Does What</div>
+      <div style={{background:'white',borderRadius:14,border:`1px solid ${N.line}`,marginBottom:16,overflow:'hidden'}}>
+        {CHORES.map((chore,ci)=>{const rows=choreDays(chore).map(d=>{const owner=ca[chore.id]?.[d];const ownerP=people.find(p=>p.id===owner);return{d,ownerP,done:owner?!!comp[`${chore.id}-${d}-${owner}`]:false};}).filter(r=>r.ownerP);if(!rows.length)return null;return(
+          <div key={chore.id} style={{padding:'10px 14px',borderBottom:ci<CHORES.length-1?'1px solid #F0F2F6':'none'}}>
+            <div style={{fontSize:13,fontWeight:700,color:chore.color,marginBottom:5}}>{chore.name}</div>
+            {rows.map(({d,ownerP,done})=>(<div key={d} style={{display:'flex',alignItems:'center',gap:8,fontSize:12.5,marginBottom:3}}><span style={{color:N.inkF,minWidth:30}}>{d}</span><span style={{color:ownerP.color,fontWeight:600}}>{ownerP.name}</span><span style={{marginLeft:'auto',color:done?N.good:N.inkF,fontWeight:700,fontSize:11}}>{done?'Done':'Pending'}</span></div>))}
+          </div>
+        );})}
+      </div>
+      {(state.history||[]).length>0&&(<>
+        <div style={{fontSize:11.5,fontWeight:800,letterSpacing:'0.08em',textTransform:'uppercase',color:N.inkS,marginBottom:8}}>Past Weeks</div>
+        {[...(state.history||[])].reverse().map((entry,idx)=>{
+          const key=entry.archivedAt||idx;const isExp=expanded===key;const ppl=entry.people||people;
+          const summaries=ppl.map(p=>({...p,...choreStats(p.id,entry.choreAssignments,entry.completions)}));
+          return(<div key={key} style={{background:'white',borderRadius:14,border:`1px solid ${N.line}`,marginBottom:10,overflow:'hidden'}}>
+            <div onClick={()=>setExpanded(isExp?null:key)} style={{padding:'14px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer'}}>
+              <div><div style={{fontSize:14,fontWeight:700}}>{entry.weekOf||'Unnamed week'}</div><div style={{fontSize:11.5,color:N.inkF}}>{entry.archivedAt?new Date(entry.archivedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):''}</div></div>
+              <div style={{display:'flex',gap:10,alignItems:'center'}}>
+                {summaries.map(s=>(<div key={s.id} style={{textAlign:'center'}}><div style={{fontSize:12,fontWeight:800,color:s.color}}>{s.pct}%</div><div style={{fontSize:9,color:N.inkF}}>{s.name.split(' ')[0]}</div></div>))}
+                <span style={{fontSize:14,color:N.inkF}}>{isExp?'▲':'▼'}</span>
+              </div>
+            </div>
+            {isExp&&(<div style={{borderTop:`1px solid ${N.line}`}}>
+              {summaries.map(s=>(<div key={s.id} style={{padding:'12px 16px',borderBottom:'1px solid #F0F2F6'}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}><div style={{display:'flex',alignItems:'center',gap:6,fontWeight:700,fontSize:13}}><Dot color={s.color} sz={8}/>{s.name}</div><span style={{fontSize:13,fontWeight:800,color:s.color}}>{s.pct}% ({s.done}/{s.assigned})</span></div>
+                <ProgressBar pct={s.pct} color={s.color}/>
+              </div>))}
+              <div style={{padding:'12px 16px'}}>
+                <div style={{fontSize:10,fontWeight:700,color:N.inkF,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:10}}>Detail</div>
+                {CHORES.map(chore=>{const rows=choreDays(chore).map(d=>{const owner=entry.choreAssignments?.[chore.id]?.[d];const ownerP=ppl.find(p=>p.id===owner);return{d,ownerP,done:owner?!!(entry.completions?.[`${chore.id}-${d}-${owner}`]):false};}).filter(r=>r.ownerP);if(!rows.length)return null;return(
+                  <div key={chore.id} style={{marginBottom:10}}>
+                    <div style={{fontSize:12,fontWeight:700,color:chore.color,marginBottom:4}}>{chore.name}</div>
+                    {rows.map(({d,ownerP,done})=>(<div key={d} style={{display:'flex',gap:8,fontSize:12,color:N.inkS,marginBottom:3}}><span style={{minWidth:30}}>{d}</span><span style={{color:ownerP.color,fontWeight:600}}>{ownerP.name}</span><span style={{marginLeft:'auto',color:done?N.good:N.inkF,fontWeight:700}}>{done?'Done':'✗'}</span></div>))}
+                  </div>
+                );})}
+              </div>
+            </div>)}
+          </div>);
+        })}
+      </>)}
+      {(state.history||[]).length===0&&<div style={{textAlign:'center',color:N.inkF,fontSize:13.5,padding:'40px 20px',lineHeight:1.6}}>No past weeks yet. Tap Start This Week in the Plan tab to archive.</div>}
+    </div>
+  );
+}
+
+
+const _root = ReactDOM.createRoot(document.getElementById('root'));
+_root.render(React.createElement(App));
+</script>
+</body>
+</html>
